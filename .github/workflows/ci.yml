@@ -5,15 +5,18 @@ on:
   pull_request:
 
 jobs:
-  build:
+  build-and-test:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
       - name: Install PlatformIO
         run: pip install platformio
 
-      - name: Build Firmware
-        run: pio run
+      - name: Build ESP32 Firmware
+        run: platformio run -e freenove_esp32_s3_wroom
+
+      - name: Run Native Unit Tests
+        run: platformio test -e native

@@ -12,6 +12,7 @@
 //   Task 5  vOledCommTask       Core 0  Prio 2   120 ms  OLED HUD via I2C
 //   Task 6  vLoggingTask        Core 0  Prio 1   500 ms  Serial diagnostics
 //   Task 7  vBuzzerTask         Core 0  Prio 3   event   Active buzzer SFX
+//   Task 8  vTelemetryTask      Core 0  Prio 1   100 ms  WebSocket JSON telemetry // AFTER UPDATE
 //
 // SYNCHRONISATION:
 //   xPotQueue          Queue(5)       Analog task  → Game task
@@ -21,6 +22,7 @@
 //   xInputMutex        Mutex          Digital task ↔ Game task
 //   xSnapshotMutex     Mutex          Game task    ↔ OLED / Log tasks
 //   xSerialMutex       Mutex          Log task     (Serial protection)
+//   xTelemetryMutex    Mutex          Game task    ↔ Telemetry task LED mirror // AFTER UPDATE
 //
 //   ISR: onButtonISR() on FALLING edge of all 4 buttons
 //   Timeout ops: xQueueSend, xSemaphoreTake with pdMS_TO_TICKS
@@ -33,6 +35,10 @@
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
+#include <WiFi.h> // AFTER UPDATE
+#include <WebSocketsServer.h> // AFTER UPDATE
+#include <ArduinoJson.h> // AFTER UPDATE
+#include "game_logic.h"
 
 // --------------------------------------------------------------------------
 // 1. DEFINITIONS
@@ -80,12 +86,7 @@ CRGB col_c1, col_c2, col_c3, col_c4, col_c5, col_c6, col_cw, col_cb;
 // --------------------------------------------------------------------------
 // 2. DATA TYPES
 // --------------------------------------------------------------------------
-enum GameState {
-    STATE_MENU, STATE_INTRO, STATE_PLAYING, STATE_BOSS_PLAYING,
-    STATE_LEVEL_COMPLETED, STATE_GAME_FINISHED, STATE_BASE_DESTROYED, STATE_GAMEOVER,
-    STATE_BONUS_INTRO, STATE_BONUS_PLAYING,
-    STATE_BONUS_SIMON
-};
+// GameState enum is defined in lib/game_logic/game_logic.h (included above).
 
 enum Boss2State { B2_MOVE, B2_CHARGE, B2_SHOOT };
 enum Boss3State { B3_MOVE, B3_PHASE_CHANGE, B3_BURST, B3_WAIT };
@@ -131,8 +132,90 @@ struct GameSnapshot {
     int       bonusLivesVal;
     int       simonStageVal;
     int       simonLivesVal;
+    int       currentBossTypeVal; // AFTER UPDATE
+    int       activeProjectiles; // AFTER UPDATE
+    int       comboColorVal; // AFTER UPDATE
     unsigned long stateTimerVal;
 };
+
+struct GameTelemetry { // AFTER UPDATE
+    int level; // AFTER UPDATE
+    long score; // AFTER UPDATE
+    int enemiesRemaining; // AFTER UPDATE
+    int bossHP; // AFTER UPDATE
+    int maxBossHP; // AFTER UPDATE
+    String gameState; // AFTER UPDATE
+    int comboColor; // AFTER UPDATE
+    int playerAccuracy; // AFTER UPDATE
+    int activeProjectiles; // AFTER UPDATE
+    int simonStage; // AFTER UPDATE
+    bool beatSaberMode; // AFTER UPDATE
+    bool simonMode; // AFTER UPDATE
+}; // AFTER UPDATE
+
+// --- Event streaming system (fixed-size, queue-friendly) --- // AFTER UPDATE
+enum TelemetryEventType : uint8_t { // AFTER UPDATE
+    EVT_STATE_CHANGE = 0, // AFTER UPDATE
+    EVT_LEVEL_COMPLETED, // AFTER UPDATE
+    EVT_BOSS_SPAWNED, // AFTER UPDATE
+    EVT_BOSS_SEGMENT_DESTROYED, // AFTER UPDATE
+    EVT_ENEMY_DESTROYED, // AFTER UPDATE
+    EVT_COMBO_TRIGGERED, // AFTER UPDATE
+    EVT_COMBO_FAILED, // AFTER UPDATE
+    EVT_SIMON_STARTED, // AFTER UPDATE
+    EVT_SIMON_COMPLETED, // AFTER UPDATE
+    EVT_BEATSABER_STARTED, // AFTER UPDATE
+    EVT_BEATSABER_COMPLETED, // AFTER UPDATE
+    EVT_GAME_OVER, // AFTER UPDATE
+    EVT_GAME_WON, // AFTER UPDATE
+    EVT_BASE_DESTROYED, // AFTER UPDATE
+    EVT_PLAYER_HIT, // AFTER UPDATE
+    EVT_PLAYER_DIED // AFTER UPDATE
+}; // AFTER UPDATE
+
+struct TelemetryEvent { // AFTER UPDATE
+    TelemetryEventType type; // AFTER UPDATE
+    unsigned long timestamp; // AFTER UPDATE
+    int level; // AFTER UPDATE
+    int value1; // AFTER UPDATE
+    int value2; // AFTER UPDATE
+}; // AFTER UPDATE
+
+// --- Bug reporting system --- // AFTER UPDATE
+enum BugSeverity : uint8_t { // AFTER UPDATE
+    BUG_LOW = 0, // AFTER UPDATE
+    BUG_MEDIUM, // AFTER UPDATE
+    BUG_HIGH, // AFTER UPDATE
+    BUG_CRITICAL // AFTER UPDATE
+}; // AFTER UPDATE
+
+enum BugType : uint8_t { // AFTER UPDATE
+    BUG_NEGATIVE_HP = 0, // AFTER UPDATE
+    BUG_NEGATIVE_SCORE, // AFTER UPDATE
+    BUG_INVALID_STATE, // AFTER UPDATE
+    BUG_ACCURACY_OVERFLOW, // AFTER UPDATE
+    BUG_ENEMY_COUNT_NEGATIVE, // AFTER UPDATE
+    BUG_LEVEL_OVERFLOW, // AFTER UPDATE
+    BUG_IMPOSSIBLE_COMBO, // AFTER UPDATE
+    BUG_TELEMETRY_FAILURE, // AFTER UPDATE
+    BUG_TASK_STALL // AFTER UPDATE
+}; // AFTER UPDATE
+
+struct BugReport { // AFTER UPDATE
+    BugType type; // AFTER UPDATE
+    BugSeverity severity; // AFTER UPDATE
+    unsigned long timestamp; // AFTER UPDATE
+    int level; // AFTER UPDATE
+    int value1; // AFTER UPDATE
+}; // AFTER UPDATE
+
+// --- RTOS task heartbeat (lightweight, no dynamic alloc) --- // AFTER UPDATE
+#define TASK_COUNT 8 // AFTER UPDATE
+struct TaskHeartbeat { // AFTER UPDATE
+    volatile unsigned long lastBeat; // AFTER UPDATE
+    volatile unsigned long maxIntervalMs; // AFTER UPDATE
+    const char* name; // AFTER UPDATE
+}; // AFTER UPDATE
 
 // --------------------------------------------------------------------------
 // 3. RTOS HANDLES
@@ -144,6 +227,7 @@ SemaphoreHandle_t   xRenderSem       = NULL;   // binary – game → output tas
 SemaphoreHandle_t   xInputMutex      = NULL;   // mutex  – g_buttons protection
 SemaphoreHandle_t   xSnapshotMutex   = NULL;   // mutex  – g_snapshot protection
 SemaphoreHandle_t   xSerialMutex     = NULL;   // mutex  – Serial protection
+SemaphoreHandle_t   xTelemetryMutex  = NULL;   // mutex  – telemetry LED mirror protection // AFTER UPDATE
 
 TaskHandle_t hAnalogTask  = NULL;
 TaskHandle_t hDigitalTask = NULL;
@@ -152,6 +236,7 @@ TaskHandle_t hOutputTask  = NULL;
 TaskHandle_t hOledTask    = NULL;
 TaskHandle_t hLogTask     = NULL;
 TaskHandle_t hBuzzerTask  = NULL;
+TaskHandle_t hTelemetryTask = NULL; // AFTER UPDATE
 
 // --- Shared state (protected by mutexes) ---
 ButtonState g_buttons = {false, false, false, false};
@@ -159,6 +244,38 @@ GameSnapshot         g_snapshot;
 
 // --- FPS counter (written by game task, read by log task) ---
 volatile unsigned long g_frameCount = 0;
+
+const char* WIFI_SSID = "Led"; // AFTER UPDATE
+const char* WIFI_PASSWORD = "123456789"; // AFTER UPDATE
+WebSocketsServer webSocket = WebSocketsServer(81); // AFTER UPDATE
+GameTelemetry telemetry; // AFTER UPDATE
+unsigned long telemetryTimer = 0; // AFTER UPDATE
+unsigned long telemetryWiFiRetryTimer = 0; // AFTER UPDATE
+unsigned long telemetryWiFiConnectedAt = 0; // AFTER UPDATE
+bool telemetryWebSocketStarted = false; // AFTER UPDATE
+bool telemetryWiFiConnectedPrinted = false; // AFTER UPDATE
+unsigned long telemetryPacketsSent = 0; // AFTER UPDATE
+unsigned long telemetryLastDebugPrint = 0; // AFTER UPDATE
+const unsigned long TELEMETRY_INTERVAL_MS = 100; // AFTER UPDATE
+const unsigned long WIFI_RETRY_INTERVAL_MS = 10000; // AFTER UPDATE
+const size_t TELEMETRY_JSON_RESERVE_BYTES = 8192; // AFTER UPDATE
+String telemetryJsonPacket; // AFTER UPDATE
+uint8_t telemetryLedMirror[MAX_LEDS] = {0}; // AFTER UPDATE
+uint8_t telemetryLedPacket[MAX_LEDS] = {0}; // AFTER UPDATE
+QueueHandle_t xEventQueue = NULL; // AFTER UPDATE
+QueueHandle_t xBugQueue = NULL; // AFTER UPDATE
+unsigned long telemetryLedTimer = 0; // AFTER UPDATE
+unsigned long telemetryDiagTimer = 0; // AFTER UPDATE
+const unsigned long TELEMETRY_LED_INTERVAL_MS = 150; // AFTER UPDATE
+const unsigned long TELEMETRY_DIAG_INTERVAL_MS = 500; // AFTER UPDATE
+TaskHeartbeat g_taskHeartbeats[TASK_COUNT]; // AFTER UPDATE
+volatile unsigned long g_lastFrameTimeUs = 0; // AFTER UPDATE
+volatile float g_currentFPS = 0.0; // AFTER UPDATE
+GameState g_prevState = STATE_MENU; // AFTER UPDATE
+int g_assertionFailures = 0; // AFTER UPDATE
+
+// --- Forward declaration: pushEvent is defined in section 17a but called earlier --- // AFTER UPDATE
+void pushEvent(TelemetryEventType type, int val1 = 0, int val2 = 0); // AFTER UPDATE
 
 // --------------------------------------------------------------------------
 // 4. GLOBAL GAME VARIABLES (unchanged)
@@ -320,70 +437,44 @@ void queueBuzzerEvent(BuzzerEventType type) {
 void calculateLevelScore() {
     unsigned long duration = millis() - levelStartTime;
     int entityCount = 0;
-    int calcLevel = currentLevel;
-    if (currentLevel > 10) calcLevel = ((currentLevel - 1) % 10) + 1;
+    int calcLevel   = (currentLevel > 10) ? ((currentLevel - 1) % 10) + 1 : currentLevel;
+    int bossType    = (currentLevel <= 10) ? levels[currentLevel].bossType : 0;
 
-    if (currentLevel <= 10 && levels[currentLevel].bossType > 0) {
-        if      (levels[currentLevel].bossType == 1) entityCount = 9  * boss1Cfg.hpPerLed;
-        else if (levels[currentLevel].bossType == 2) entityCount = 9  * boss2Cfg.hpPerLed;
-        else if (levels[currentLevel].bossType == 3) entityCount = 15 * boss3Cfg.hpPerLed;
+    if (bossType > 0) {
+        if      (bossType == 1) entityCount = 9  * boss1Cfg.hpPerLed;
+        else if (bossType == 2) entityCount = 9  * boss2Cfg.hpPerLed;
+        else if (bossType == 3) entityCount = 15 * boss3Cfg.hpPerLed;
     } else {
         entityCount = levels[calcLevel].length;
     }
 
-    int levelMultiplier = currentLevel;
-    int basePoints      = entityCount * 100 * levelMultiplier;
-
-    unsigned long targetTime = 0;
-    if (currentLevel <= 10 && levels[currentLevel].bossType == 2) {
-        targetTime = 36000;
-    } else {
-        unsigned long travelTime     = CONFIG_NUM_LEDS * 15;
-        unsigned long processingTime = entityCount * 300;
-        targetTime = 3000 + travelTime + processingTime;
-    }
-
-    int timeBonus    = 0;
-    int maxTimeBonus = basePoints * 3;
-
-    if (currentLevel <= 10 && levels[currentLevel].bossType == 3) {
-        timeBonus = maxTimeBonus;
-    } else {
-        if (duration <= targetTime) timeBonus = maxTimeBonus;
-        else {
-            float ratio = (float)targetTime / (float)duration;
-            timeBonus   = (int)(maxTimeBonus * ratio);
-        }
-    }
-
-    levelAchievedScore    = basePoints + timeBonus;
-    levelMaxPossibleScore = basePoints * 4;
+    ScoreResult result    = computeLevelScore(currentLevel, duration, entityCount,
+                                              bossType, CONFIG_NUM_LEDS);
+    levelAchievedScore    = result.achieved;
+    levelMaxPossibleScore = result.maxPossible;
     currentScore         += levelAchievedScore;
 }
 
 void triggerBaseDestruction() {
+    pushEvent(EVT_PLAYER_HIT, currentScore); // AFTER UPDATE
     currentState = STATE_BASE_DESTROYED;
     stateTimer   = millis();
 }
 
 void checkWinCondition() {
-    bool won = false;
-    if (currentState == STATE_PLAYING      && enemies.empty())      won = true;
-    if (currentState == STATE_BOSS_PLAYING && bossSegments.empty()) won = true;
+    if (!shouldTriggerWin((int)currentState, enemies.empty(), bossSegments.empty())) return;
 
-    if (won) {
-        calculateLevelScore();
-        autoBonusTrigger = (levelAchievedScore >= levelMaxPossibleScore);
+    calculateLevelScore();
+    autoBonusTrigger = (levelAchievedScore >= levelMaxPossibleScore);
 
-        // Celebration sound when any level/boss is completed.
-        queueBuzzerEvent(BUZZER_EVENT_LEVEL_CLEAR);
+    // Celebration sound when any level/boss is completed.
+    queueBuzzerEvent(BUZZER_EVENT_LEVEL_CLEAR);
 
-        if (!CONFIG_ENDLESS_MODE && currentLevel >= 10) {
-            currentState = STATE_GAME_FINISHED;
-        } else {
-            currentState = STATE_LEVEL_COMPLETED;
-            stateTimer   = millis();
-        }
+    if (!CONFIG_ENDLESS_MODE && currentLevel >= 10) {
+        currentState = STATE_GAME_FINISHED;
+    } else {
+        currentState = STATE_LEVEL_COMPLETED;
+        stateTimer   = millis();
     }
 }
 
@@ -676,6 +767,7 @@ void updateBonusGame() {
                     flashPixel((int)bonusShots[i].position);
                 } else {
                     bonusLives--;
+                    pushEvent(EVT_PLAYER_HIT, bonusLives); // AFTER UPDATE
                 }
                 remove = true;
                 break;
@@ -684,6 +776,7 @@ void updateBonusGame() {
         if (!remove && bonusShots[i].position >= CONFIG_NUM_LEDS) {
             remove = true;
             bonusLives--;
+            pushEvent(EVT_PLAYER_HIT, bonusLives); // AFTER UPDATE
         }
         if (remove) bonusShots.erase(bonusShots.begin() + i);
     }
@@ -694,14 +787,18 @@ void updateBonusGame() {
         if (bonusEnemies[i].pos <= CONFIG_HOMEBASE_SIZE) {
             bonusEnemies.erase(bonusEnemies.begin() + i);
             bonusLives--;
+            pushEvent(EVT_PLAYER_HIT, bonusLives); // AFTER UPDATE
         }
     }
 
     if (bonusLives <= 0) {
+        pushEvent(EVT_PLAYER_DIED, currentScore); // AFTER UPDATE
+        pushEvent(EVT_BEATSABER_COMPLETED, currentScore); // AFTER UPDATE
         startLevelIntro(bonusReturnLevel);
         return;
     }
     if (bonusEnemiesSpawned >= 200 && bonusEnemies.empty()) {
+        pushEvent(EVT_BEATSABER_COMPLETED, currentScore); // AFTER UPDATE
         startLevelIntro(bonusReturnLevel);
         return;
     }
@@ -721,11 +818,7 @@ void updateBonusGame() {
 // 15. SIMON SAYS BONUS
 //     CHANGED: digitalRead → g_buttons, removed FastLED.show()
 // --------------------------------------------------------------------------
-int getSimonStageLength(int stage) {
-    int lens[] = {4, 5, 6, 8, 9, 11, 13, 15, 17};
-    if (stage >= 0 && stage <= 8) return lens[stage];
-    return 17;
-}
+// getSimonStageLength() lives in lib/game_logic/game_logic.cpp
 
 void updateSimonBonus() {
     unsigned long now = millis();
@@ -733,6 +826,8 @@ void updateSimonBonus() {
     int currentSeqLen  = getSimonStageLength(simonStage);
 
     if (simonLives <= 0 || (simonState == S_MOVE && simonBossPos <= CONFIG_HOMEBASE_SIZE)) {
+        if (simonLives <= 0) pushEvent(EVT_PLAYER_DIED, currentScore); // AFTER UPDATE
+        pushEvent(EVT_SIMON_COMPLETED, simonStage, simonLives); // AFTER UPDATE
         startLevelIntro(bonusReturnLevel);
         return;
     }
@@ -826,6 +921,7 @@ void updateSimonBonus() {
             if (now - simonTimer > 1000) {
                 simonStage++;
                 if (simonStage >= 9) {
+                    pushEvent(EVT_SIMON_COMPLETED, simonStage, simonLives); // AFTER UPDATE
                     startLevelIntro(bonusReturnLevel);
                     return;
                 }
@@ -914,14 +1010,7 @@ const char* getStateLabelFor(GameState s) {
     }
 }
 
-const char* getScoreRankFor(int score) {
-    if (score >= 100000) return "S+";
-    if (score >= 70000)  return "S";
-    if (score >= 40000)  return "A";
-    if (score >= 20000)  return "B";
-    if (score >= 8000)   return "C";
-    return "R";
-}
+// getScoreRankFor() lives in lib/game_logic/game_logic.cpp
 
 void drawTinyBar(int x, int y, int w, int h, int value, int maxValue) {
     if (maxValue <= 0) maxValue = 1;
@@ -1146,6 +1235,445 @@ void renderOledFromSnapshot(const GameSnapshot &snap) {
     // display.display() called by OLED task after this returns
 }
 
+// -------------------------------------------------------------------------- // AFTER UPDATE
+// 17. TELEMETRY + WIFI DASHBOARD SYSTEM // AFTER UPDATE
+// -------------------------------------------------------------------------- // AFTER UPDATE
+void onWebSocketEvent(uint8_t clientId, WStype_t type, uint8_t *payload, size_t length); // AFTER UPDATE
+void setupWiFi() { // AFTER UPDATE
+    WiFi.mode(WIFI_STA); // AFTER UPDATE
+    WiFi.setSleep(false); // AFTER UPDATE
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD); // AFTER UPDATE
+    telemetryWiFiRetryTimer = millis(); // AFTER UPDATE
+    Serial.println(); // AFTER UPDATE
+    Serial.print("WiFi telemetry connecting in background to SSID: "); // AFTER UPDATE
+    Serial.println(WIFI_SSID); // AFTER UPDATE
+} // AFTER UPDATE
+
+void handleTelemetryWiFi() { // AFTER UPDATE
+    wl_status_t wifiStatus = WiFi.status(); // AFTER UPDATE
+    unsigned long now = millis(); // AFTER UPDATE
+    if (wifiStatus == WL_CONNECTED) { // AFTER UPDATE
+        if (telemetryWiFiConnectedAt == 0) telemetryWiFiConnectedAt = now; // AFTER UPDATE
+        if (!telemetryWiFiConnectedPrinted) { // AFTER UPDATE
+            telemetryWiFiConnectedPrinted = true; // AFTER UPDATE
+            Serial.print("WiFi connected. ESP32 IP: "); // AFTER UPDATE
+            Serial.println(WiFi.localIP()); // AFTER UPDATE
+        } // AFTER UPDATE
+        if (!telemetryWebSocketStarted && (now - telemetryWiFiConnectedAt >= 2000)) { // AFTER UPDATE
+            webSocket.begin(); // AFTER UPDATE
+            webSocket.onEvent(onWebSocketEvent); // AFTER UPDATE
+            webSocket.enableHeartbeat(15000, 3000, 2); // AFTER UPDATE
+            telemetryWebSocketStarted = true; // AFTER UPDATE
+            Serial.println("WebSocket telemetry port: 81"); // AFTER UPDATE
+        } // AFTER UPDATE
+        return; // AFTER UPDATE
+    } // AFTER UPDATE
+
+    telemetryWiFiConnectedAt = 0; // AFTER UPDATE
+    telemetryWiFiConnectedPrinted = false; // AFTER UPDATE
+    if (now - telemetryWiFiRetryTimer >= WIFI_RETRY_INTERVAL_MS) { // AFTER UPDATE
+        telemetryWiFiRetryTimer = now; // AFTER UPDATE
+        Serial.print("WiFi not connected. status="); // AFTER UPDATE
+        Serial.print((int)wifiStatus); // AFTER UPDATE
+        Serial.println(" | retrying in background..."); // AFTER UPDATE
+        WiFi.disconnect(); // AFTER UPDATE
+        WiFi.begin(WIFI_SSID, WIFI_PASSWORD); // AFTER UPDATE
+    } // AFTER UPDATE
+} // AFTER UPDATE
+
+void onWebSocketEvent(uint8_t clientId, WStype_t type, uint8_t *payload, size_t length) { // AFTER UPDATE
+    (void)payload; // AFTER UPDATE
+    (void)length; // AFTER UPDATE
+    if (type == WStype_CONNECTED) { // AFTER UPDATE
+        IPAddress ip = webSocket.remoteIP(clientId); // AFTER UPDATE
+        Serial.printf("[WS] Client %u connected from %u.%u.%u.%u\n", clientId, ip[0], ip[1], ip[2], ip[3]); // AFTER UPDATE
+    } // AFTER UPDATE
+    else if (type == WStype_DISCONNECTED) { // AFTER UPDATE
+        Serial.printf("[WS] Client %u disconnected\n", clientId); // AFTER UPDATE
+    } // AFTER UPDATE
+} // AFTER UPDATE
+
+String getGameStateNameFrom(GameState stateValue) { // AFTER UPDATE
+    switch (stateValue) { // AFTER UPDATE
+        case STATE_MENU: return "MENU"; // AFTER UPDATE
+        case STATE_INTRO: return "INTRO"; // AFTER UPDATE
+        case STATE_PLAYING: return "PLAYING"; // AFTER UPDATE
+        case STATE_BOSS_PLAYING: return "BOSS"; // AFTER UPDATE
+        case STATE_LEVEL_COMPLETED: return "LEVEL_COMPLETE"; // AFTER UPDATE
+        case STATE_GAME_FINISHED: return "FINISHED"; // AFTER UPDATE
+        case STATE_BASE_DESTROYED: return "BASE_DESTROYED"; // AFTER UPDATE
+        case STATE_GAMEOVER: return "GAME_OVER"; // AFTER UPDATE
+        case STATE_BONUS_INTRO: return "BONUS_INTRO"; // AFTER UPDATE
+        case STATE_BONUS_PLAYING: return "BEAT_SABER"; // AFTER UPDATE
+        case STATE_BONUS_SIMON: return "SIMON"; // AFTER UPDATE
+        default: return "UNKNOWN"; // AFTER UPDATE
+    } // AFTER UPDATE
+} // AFTER UPDATE
+
+String getGameStateName() { // AFTER UPDATE
+    return getGameStateNameFrom(currentState); // AFTER UPDATE
+} // AFTER UPDATE
+
+String getTelemetryModeName(GameState stateValue, int bossTypeValue) { // AFTER UPDATE
+    if (stateValue == STATE_BONUS_PLAYING) return "BEAT_SABER"; // AFTER UPDATE
+    if (stateValue == STATE_BONUS_SIMON) return "SIMON"; // AFTER UPDATE
+    if (stateValue == STATE_BOSS_PLAYING && bossTypeValue == 3) return "FINAL_BOSS"; // AFTER UPDATE
+    if (stateValue == STATE_BOSS_PLAYING) return "BOSS"; // AFTER UPDATE
+    return "NORMAL"; // AFTER UPDATE
+} // AFTER UPDATE
+
+int calculateBossHP() { // AFTER UPDATE
+    int hp = 0; // AFTER UPDATE
+    for (size_t i = 0; i < bossSegments.size(); i++) { // AFTER UPDATE
+        hp += bossSegments[i].hp; // AFTER UPDATE
+    } // AFTER UPDATE
+    return hp; // AFTER UPDATE
+} // AFTER UPDATE
+
+int calculateMaxBossHP() { // AFTER UPDATE
+    int hp = 0; // AFTER UPDATE
+    for (size_t i = 0; i < bossSegments.size(); i++) { // AFTER UPDATE
+        hp += bossSegments[i].maxHp; // AFTER UPDATE
+    } // AFTER UPDATE
+    return hp; // AFTER UPDATE
+} // AFTER UPDATE
+
+int getCurrentComboColorTelemetry() { // AFTER UPDATE
+    return getComboColor(g_buttons.blue, g_buttons.red, g_buttons.green); // AFTER UPDATE
+} // AFTER UPDATE
+
+int calculatePlayerAccuracyTelemetry(const GameSnapshot &snap) { // AFTER UPDATE
+    return computeAccuracy(snap.lvlAchievedScore, snap.lvlMaxPossibleScore); // AFTER UPDATE
+} // AFTER UPDATE
+
+uint8_t getLedColorIdTelemetry(const CRGB &color) { // AFTER UPDATE
+    return getLedColorId(color.r, color.g, color.b); // AFTER UPDATE
+} // AFTER UPDATE
+
+int getTelemetryLedCount() { // AFTER UPDATE
+    int count = CONFIG_NUM_LEDS; // AFTER UPDATE
+    if (count < 0) count = 0; // AFTER UPDATE
+    if (count > MAX_LEDS) count = MAX_LEDS; // AFTER UPDATE
+    return count; // AFTER UPDATE
+} // AFTER UPDATE
+
+void updateTelemetryLedMirror() { // AFTER UPDATE
+    if (xTelemetryMutex == NULL) return; // AFTER UPDATE
+    if (xSemaphoreTake(xTelemetryMutex, 0) != pdTRUE) return; // AFTER UPDATE
+    int ledCountForTelemetry = getTelemetryLedCount(); // AFTER UPDATE
+    for (int i = 0; i < ledCountForTelemetry; i++) { // AFTER UPDATE
+        int sourceLedIndex = i + ledStartOffset; // AFTER UPDATE
+        if (sourceLedIndex >= MAX_LEDS) break; // AFTER UPDATE
+        telemetryLedMirror[i] = getLedColorIdTelemetry(leds[sourceLedIndex]); // AFTER UPDATE
+    } // AFTER UPDATE
+    xSemaphoreGive(xTelemetryMutex); // AFTER UPDATE
+} // AFTER UPDATE
+
+bool copyTelemetryLedMirrorForPacket(int ledCountForTelemetry) { // AFTER UPDATE
+    if (xTelemetryMutex == NULL) return false; // AFTER UPDATE
+    if (xSemaphoreTake(xTelemetryMutex, pdMS_TO_TICKS(2)) != pdTRUE) return false; // AFTER UPDATE
+    for (int i = 0; i < ledCountForTelemetry; i++) { // AFTER UPDATE
+        telemetryLedPacket[i] = telemetryLedMirror[i]; // AFTER UPDATE
+    } // AFTER UPDATE
+    xSemaphoreGive(xTelemetryMutex); // AFTER UPDATE
+    return true; // AFTER UPDATE
+} // AFTER UPDATE
+
+void sendTelemetry() { // AFTER UPDATE
+    if (WiFi.status() != WL_CONNECTED) return; // AFTER UPDATE
+    if (!telemetryWebSocketStarted) return; // AFTER UPDATE
+    GameSnapshot snap; // AFTER UPDATE
+    if (xSemaphoreTake(xSnapshotMutex, pdMS_TO_TICKS(2)) == pdTRUE) { // AFTER UPDATE
+        snap = g_snapshot; // AFTER UPDATE
+        xSemaphoreGive(xSnapshotMutex); // AFTER UPDATE
+    } else { // AFTER UPDATE
+        return; // AFTER UPDATE
+    } // AFTER UPDATE
+
+    int ledCountForTelemetry = getTelemetryLedCount(); // AFTER UPDATE
+    if (!copyTelemetryLedMirrorForPacket(ledCountForTelemetry)) return; // AFTER UPDATE
+
+    telemetry.level = snap.level; // AFTER UPDATE
+    telemetry.score = snap.score; // AFTER UPDATE
+    telemetry.enemiesRemaining = snap.enemiesRemaining; // AFTER UPDATE
+    telemetry.bossHP = (snap.state == STATE_BOSS_PLAYING) ? snap.bossHpCurrent : 0; // AFTER UPDATE
+    telemetry.maxBossHP = (snap.state == STATE_BOSS_PLAYING) ? snap.bossHpMax : 0; // AFTER UPDATE
+    telemetry.gameState = getGameStateNameFrom(snap.state); // AFTER UPDATE
+    telemetry.comboColor = snap.comboColorVal; // AFTER UPDATE
+    telemetry.playerAccuracy = calculatePlayerAccuracyTelemetry(snap); // AFTER UPDATE
+    telemetry.activeProjectiles = snap.activeProjectiles; // AFTER UPDATE
+    telemetry.simonStage = snap.simonStageVal; // AFTER UPDATE
+    telemetry.beatSaberMode = (snap.state == STATE_BONUS_PLAYING); // AFTER UPDATE
+    telemetry.simonMode = (snap.state == STATE_BONUS_SIMON); // AFTER UPDATE
+
+    telemetryJsonPacket = ""; // AFTER UPDATE
+    telemetryJsonPacket.reserve(TELEMETRY_JSON_RESERVE_BYTES); // AFTER UPDATE
+    telemetryJsonPacket += "{\"type\":\"telemetry\",\"level\":"; // AFTER UPDATE
+    telemetryJsonPacket += telemetry.level; // AFTER UPDATE
+    telemetryJsonPacket += ",\"score\":"; // AFTER UPDATE
+    telemetryJsonPacket += telemetry.score; // AFTER UPDATE
+    telemetryJsonPacket += ",\"bossHP\":"; // AFTER UPDATE
+    telemetryJsonPacket += telemetry.bossHP; // AFTER UPDATE
+    telemetryJsonPacket += ",\"maxBossHP\":"; // AFTER UPDATE
+    telemetryJsonPacket += telemetry.maxBossHP; // AFTER UPDATE
+    telemetryJsonPacket += ",\"enemies\":"; // AFTER UPDATE
+    telemetryJsonPacket += telemetry.enemiesRemaining; // AFTER UPDATE
+    telemetryJsonPacket += ",\"state\":\""; // AFTER UPDATE
+    telemetryJsonPacket += telemetry.gameState; // AFTER UPDATE
+    telemetryJsonPacket += "\",\"projectiles\":"; // AFTER UPDATE
+    telemetryJsonPacket += telemetry.activeProjectiles; // AFTER UPDATE
+    telemetryJsonPacket += ",\"accuracy\":"; // AFTER UPDATE
+    telemetryJsonPacket += telemetry.playerAccuracy; // AFTER UPDATE
+    telemetryJsonPacket += ",\"comboColor\":"; // AFTER UPDATE
+    telemetryJsonPacket += telemetry.comboColor; // AFTER UPDATE
+    telemetryJsonPacket += ",\"mode\":\""; // AFTER UPDATE
+    telemetryJsonPacket += getTelemetryModeName(snap.state, snap.currentBossTypeVal); // AFTER UPDATE
+    telemetryJsonPacket += "\",\"simonStage\":"; // AFTER UPDATE
+    telemetryJsonPacket += telemetry.simonStage; // AFTER UPDATE
+    telemetryJsonPacket += ",\"beatSaber\":"; // AFTER UPDATE
+    telemetryJsonPacket += telemetry.beatSaberMode ? "true" : "false"; // AFTER UPDATE
+    telemetryJsonPacket += ",\"ledCount\":"; // AFTER UPDATE
+    telemetryJsonPacket += ledCountForTelemetry; // AFTER UPDATE
+    telemetryJsonPacket += ",\"timestamp\":"; // AFTER UPDATE
+    telemetryJsonPacket += millis(); // AFTER UPDATE
+    telemetryJsonPacket += ",\"leds\":["; // AFTER UPDATE
+
+    for (int i = 0; i < ledCountForTelemetry; i++) { // AFTER UPDATE
+        if (i > 0) telemetryJsonPacket += ','; // AFTER UPDATE
+        telemetryJsonPacket += (int)telemetryLedPacket[i]; // AFTER UPDATE
+    } // AFTER UPDATE
+    telemetryJsonPacket += "]}"; // AFTER UPDATE
+
+    webSocket.broadcastTXT(telemetryJsonPacket); // AFTER UPDATE
+    telemetryPacketsSent++; // AFTER UPDATE
+} // AFTER UPDATE
+
+// -------------------------------------------------------------------------- // AFTER UPDATE
+// 17a. EVENT STREAMING & BUG REPORTING HELPERS // AFTER UPDATE
+// -------------------------------------------------------------------------- // AFTER UPDATE
+
+const char* getEventName(TelemetryEventType t) { // AFTER UPDATE
+    switch (t) { // AFTER UPDATE
+        case EVT_STATE_CHANGE:            return "STATE_CHANGED"; // AFTER UPDATE
+        case EVT_LEVEL_COMPLETED:         return "LEVEL_COMPLETED"; // AFTER UPDATE
+        case EVT_BOSS_SPAWNED:            return "BOSS_SPAWNED"; // AFTER UPDATE
+        case EVT_BOSS_SEGMENT_DESTROYED:  return "BOSS_SEGMENT_DESTROYED"; // AFTER UPDATE
+        case EVT_ENEMY_DESTROYED:         return "ENEMY_DESTROYED"; // AFTER UPDATE
+        case EVT_COMBO_TRIGGERED:         return "COMBO_TRIGGERED"; // AFTER UPDATE
+        case EVT_COMBO_FAILED:            return "COMBO_FAILED"; // AFTER UPDATE
+        case EVT_SIMON_STARTED:           return "SIMON_STARTED"; // AFTER UPDATE
+        case EVT_SIMON_COMPLETED:         return "SIMON_COMPLETED"; // AFTER UPDATE
+        case EVT_BEATSABER_STARTED:       return "BEAT_SABER_STARTED"; // AFTER UPDATE
+        case EVT_BEATSABER_COMPLETED:     return "BEAT_SABER_COMPLETED"; // AFTER UPDATE
+        case EVT_GAME_OVER:               return "GAME_OVER"; // AFTER UPDATE
+        case EVT_GAME_WON:                return "GAME_WON"; // AFTER UPDATE
+        case EVT_BASE_DESTROYED:          return "BASE_DESTROYED"; // AFTER UPDATE
+        case EVT_PLAYER_HIT:              return "PLAYER_HIT"; // AFTER UPDATE
+        case EVT_PLAYER_DIED:             return "PLAYER_DIED"; // AFTER UPDATE
+        default:                          return "UNKNOWN"; // AFTER UPDATE
+    } // AFTER UPDATE
+} // AFTER UPDATE
+
+const char* getEventSeverity(TelemetryEventType t) { // AFTER UPDATE
+    switch (t) { // AFTER UPDATE
+        case EVT_GAME_OVER:               return "error"; // AFTER UPDATE
+        case EVT_PLAYER_DIED:             return "error"; // AFTER UPDATE
+        case EVT_BASE_DESTROYED:          return "error"; // AFTER UPDATE
+        case EVT_COMBO_FAILED:            return "warning"; // AFTER UPDATE
+        case EVT_PLAYER_HIT:              return "warning"; // AFTER UPDATE
+        case EVT_GAME_WON:                return "info"; // AFTER UPDATE
+        case EVT_BOSS_SPAWNED:            return "info"; // AFTER UPDATE
+        case EVT_BOSS_SEGMENT_DESTROYED:  return "info"; // AFTER UPDATE
+        case EVT_LEVEL_COMPLETED:         return "info"; // AFTER UPDATE
+        case EVT_ENEMY_DESTROYED:         return "info"; // AFTER UPDATE
+        case EVT_COMBO_TRIGGERED:         return "info"; // AFTER UPDATE
+        case EVT_SIMON_STARTED:           return "info"; // AFTER UPDATE
+        case EVT_SIMON_COMPLETED:         return "info"; // AFTER UPDATE
+        case EVT_BEATSABER_STARTED:       return "info"; // AFTER UPDATE
+        case EVT_BEATSABER_COMPLETED:     return "info"; // AFTER UPDATE
+        case EVT_STATE_CHANGE:            return "info"; // AFTER UPDATE
+        default:                          return "info"; // AFTER UPDATE
+    } // AFTER UPDATE
+} // AFTER UPDATE
+
+const char* getBugName(BugType t) { // AFTER UPDATE
+    switch (t) { // AFTER UPDATE
+        case BUG_NEGATIVE_HP:          return "NEGATIVE_HP"; // AFTER UPDATE
+        case BUG_NEGATIVE_SCORE:       return "NEGATIVE_SCORE"; // AFTER UPDATE
+        case BUG_INVALID_STATE:        return "INVALID_STATE"; // AFTER UPDATE
+        case BUG_ACCURACY_OVERFLOW:    return "ACCURACY_OVERFLOW"; // AFTER UPDATE
+        case BUG_ENEMY_COUNT_NEGATIVE: return "ENEMY_COUNT_NEGATIVE"; // AFTER UPDATE
+        case BUG_LEVEL_OVERFLOW:       return "LEVEL_OVERFLOW"; // AFTER UPDATE
+        case BUG_IMPOSSIBLE_COMBO:     return "IMPOSSIBLE_COMBO"; // AFTER UPDATE
+        case BUG_TELEMETRY_FAILURE:    return "TELEMETRY_FAILURE"; // AFTER UPDATE
+        case BUG_TASK_STALL:           return "TASK_STALL"; // AFTER UPDATE
+        default:                       return "UNKNOWN"; // AFTER UPDATE
+    } // AFTER UPDATE
+} // AFTER UPDATE
+
+const char* getSeverityName(BugSeverity s) { // AFTER UPDATE
+    switch (s) { // AFTER UPDATE
+        case BUG_LOW:      return "LOW"; // AFTER UPDATE
+        case BUG_MEDIUM:   return "MEDIUM"; // AFTER UPDATE
+        case BUG_HIGH:     return "HIGH"; // AFTER UPDATE
+        case BUG_CRITICAL: return "CRITICAL"; // AFTER UPDATE
+        default:           return "UNKNOWN"; // AFTER UPDATE
+    } // AFTER UPDATE
+} // AFTER UPDATE
+
+void pushEvent(TelemetryEventType type, int val1, int val2) { // AFTER UPDATE
+    if (xEventQueue == NULL) return; // AFTER UPDATE
+    TelemetryEvent evt; // AFTER UPDATE
+    evt.type = type; // AFTER UPDATE
+    evt.timestamp = millis(); // AFTER UPDATE
+    evt.level = currentLevel; // AFTER UPDATE
+    evt.value1 = val1; // AFTER UPDATE
+    evt.value2 = val2; // AFTER UPDATE
+    xQueueSend(xEventQueue, &evt, 0); // AFTER UPDATE
+} // AFTER UPDATE
+
+void pushBug(BugType type, BugSeverity severity, int val1 = 0) { // AFTER UPDATE
+    if (xBugQueue == NULL) return; // AFTER UPDATE
+    BugReport bug; // AFTER UPDATE
+    bug.type = type; // AFTER UPDATE
+    bug.severity = severity; // AFTER UPDATE
+    bug.timestamp = millis(); // AFTER UPDATE
+    bug.level = currentLevel; // AFTER UPDATE
+    bug.value1 = val1; // AFTER UPDATE
+    xQueueSend(xBugQueue, &bug, 0); // AFTER UPDATE
+    g_assertionFailures++; // AFTER UPDATE
+} // AFTER UPDATE
+
+// Lightweight runtime assertion macro (non-blocking) // AFTER UPDATE
+#define TELEM_ASSERT(cond, bugType, severity, val) \
+    do { if (!(cond)) pushBug(bugType, severity, val); } while(0) // AFTER UPDATE
+
+void sendEventPacket(const TelemetryEvent &evt) { // AFTER UPDATE
+    if (!telemetryWebSocketStarted || WiFi.status() != WL_CONNECTED) return; // AFTER UPDATE
+    if (webSocket.connectedClients() == 0) return; // AFTER UPDATE
+    String pkt; // AFTER UPDATE
+    pkt.reserve(256); // AFTER UPDATE
+    pkt += "{\"type\":\"event\",\"event\":\""; // AFTER UPDATE
+    pkt += getEventName(evt.type); // AFTER UPDATE
+    pkt += "\",\"timestamp\":"; // AFTER UPDATE
+    pkt += evt.timestamp; // AFTER UPDATE
+    pkt += ",\"level\":"; // AFTER UPDATE
+    pkt += evt.level; // AFTER UPDATE
+    pkt += ",\"severity\":\""; // AFTER UPDATE
+    pkt += getEventSeverity(evt.type); // AFTER UPDATE
+    pkt += "\",\"value1\":"; // AFTER UPDATE
+    pkt += evt.value1; // AFTER UPDATE
+    pkt += ",\"value2\":"; // AFTER UPDATE
+    pkt += evt.value2; // AFTER UPDATE
+    pkt += "}"; // AFTER UPDATE
+    webSocket.broadcastTXT(pkt); // AFTER UPDATE
+} // AFTER UPDATE
+
+void sendBugPacket(const BugReport &bug) { // AFTER UPDATE
+    if (!telemetryWebSocketStarted || WiFi.status() != WL_CONNECTED) return; // AFTER UPDATE
+    if (webSocket.connectedClients() == 0) return; // AFTER UPDATE
+    String pkt; // AFTER UPDATE
+    pkt.reserve(256); // AFTER UPDATE
+    pkt += "{\"type\":\"bug\",\"severity\":\""; // AFTER UPDATE
+    pkt += getSeverityName(bug.severity); // AFTER UPDATE
+    pkt += "\",\"bug\":\""; // AFTER UPDATE
+    pkt += getBugName(bug.type); // AFTER UPDATE
+    pkt += "\",\"timestamp\":"; // AFTER UPDATE
+    pkt += bug.timestamp; // AFTER UPDATE
+    pkt += ",\"state\":\""; // AFTER UPDATE
+    pkt += getGameStateName(); // AFTER UPDATE
+    pkt += "\",\"level\":"; // AFTER UPDATE
+    pkt += bug.level; // AFTER UPDATE
+    pkt += ",\"value\":"; // AFTER UPDATE
+    pkt += bug.value1; // AFTER UPDATE
+    pkt += "}"; // AFTER UPDATE
+    webSocket.broadcastTXT(pkt); // AFTER UPDATE
+} // AFTER UPDATE
+
+void sendDiagnosticsPacket() { // AFTER UPDATE
+    if (!telemetryWebSocketStarted || WiFi.status() != WL_CONNECTED) return; // AFTER UPDATE
+    if (webSocket.connectedClients() == 0) return; // AFTER UPDATE
+    String pkt; // AFTER UPDATE
+    pkt.reserve(512); // AFTER UPDATE
+    pkt += "{\"type\":\"diagnostics\",\"timestamp\":"; // AFTER UPDATE
+    pkt += millis(); // AFTER UPDATE
+    pkt += ",\"fps\":"; // AFTER UPDATE
+    pkt += (int)g_currentFPS; // AFTER UPDATE
+    pkt += ",\"frameTimeUs\":"; // AFTER UPDATE
+    pkt += g_lastFrameTimeUs; // AFTER UPDATE
+    pkt += ",\"heap\":"; // AFTER UPDATE
+    pkt += (int)esp_get_free_heap_size(); // AFTER UPDATE
+    pkt += ",\"minHeap\":"; // AFTER UPDATE
+    pkt += (int)esp_get_minimum_free_heap_size(); // AFTER UPDATE
+    pkt += ",\"wifiRssi\":"; // AFTER UPDATE
+    pkt += WiFi.RSSI(); // AFTER UPDATE
+    pkt += ",\"wsClients\":"; // AFTER UPDATE
+    pkt += webSocket.connectedClients(); // AFTER UPDATE
+    pkt += ",\"packetsSent\":"; // AFTER UPDATE
+    pkt += telemetryPacketsSent; // AFTER UPDATE
+    pkt += ",\"assertions\":"; // AFTER UPDATE
+    pkt += g_assertionFailures; // AFTER UPDATE
+    pkt += ",\"tasks\":["; // AFTER UPDATE
+    for (int i = 0; i < TASK_COUNT; i++) { // AFTER UPDATE
+        if (i > 0) pkt += ','; // AFTER UPDATE
+        pkt += "{\"name\":\""; // AFTER UPDATE
+        pkt += (g_taskHeartbeats[i].name ? g_taskHeartbeats[i].name : "?"); // AFTER UPDATE
+        pkt += "\",\"lastBeat\":"; // AFTER UPDATE
+        pkt += g_taskHeartbeats[i].lastBeat; // AFTER UPDATE
+        pkt += ",\"maxMs\":"; // AFTER UPDATE
+        pkt += g_taskHeartbeats[i].maxIntervalMs; // AFTER UPDATE
+        pkt += "}"; // AFTER UPDATE
+    } // AFTER UPDATE
+    pkt += "]}"; // AFTER UPDATE
+    webSocket.broadcastTXT(pkt); // AFTER UPDATE
+} // AFTER UPDATE
+
+void updateTaskHeartbeat(int taskIndex) { // AFTER UPDATE
+    if (taskIndex < 0 || taskIndex >= TASK_COUNT) return; // AFTER UPDATE
+    unsigned long now = millis(); // AFTER UPDATE
+    unsigned long prev = g_taskHeartbeats[taskIndex].lastBeat; // AFTER UPDATE
+    if (prev > 0) { // AFTER UPDATE
+        unsigned long interval = now - prev; // AFTER UPDATE
+        if (interval > g_taskHeartbeats[taskIndex].maxIntervalMs) { // AFTER UPDATE
+            g_taskHeartbeats[taskIndex].maxIntervalMs = interval; // AFTER UPDATE
+        } // AFTER UPDATE
+    } // AFTER UPDATE
+    g_taskHeartbeats[taskIndex].lastBeat = now; // AFTER UPDATE
+} // AFTER UPDATE
+
+void checkStateTransitionEvents() { // AFTER UPDATE
+    if (currentState != g_prevState) { // AFTER UPDATE
+        pushEvent(EVT_STATE_CHANGE, (int)g_prevState, (int)currentState); // AFTER UPDATE
+        if (currentState == STATE_GAMEOVER) pushEvent(EVT_GAME_OVER, currentScore); // AFTER UPDATE
+        if (currentState == STATE_GAME_FINISHED) pushEvent(EVT_GAME_WON, currentScore); // AFTER UPDATE
+        if (currentState == STATE_BASE_DESTROYED) pushEvent(EVT_BASE_DESTROYED); // AFTER UPDATE
+        if (currentState == STATE_BOSS_PLAYING && g_prevState != STATE_BOSS_PLAYING) { // AFTER UPDATE
+            pushEvent(EVT_BOSS_SPAWNED, currentBossType); // AFTER UPDATE
+        } // AFTER UPDATE
+        if (currentState == STATE_BONUS_PLAYING && g_prevState != STATE_BONUS_PLAYING) { // AFTER UPDATE
+            pushEvent(EVT_BEATSABER_STARTED); // AFTER UPDATE
+        } // AFTER UPDATE
+        if (currentState == STATE_BONUS_SIMON && g_prevState != STATE_BONUS_SIMON) { // AFTER UPDATE
+            pushEvent(EVT_SIMON_STARTED); // AFTER UPDATE
+        } // AFTER UPDATE
+        if (currentState == STATE_LEVEL_COMPLETED) { // AFTER UPDATE
+            pushEvent(EVT_LEVEL_COMPLETED, levelAchievedScore, levelMaxPossibleScore); // AFTER UPDATE
+        } // AFTER UPDATE
+        g_prevState = currentState; // AFTER UPDATE
+    } // AFTER UPDATE
+} // AFTER UPDATE
+
+void runTelemetryAssertions() { // AFTER UPDATE
+    TELEM_ASSERT(currentScore >= 0, BUG_NEGATIVE_SCORE, BUG_HIGH, currentScore); // AFTER UPDATE
+    TELEM_ASSERT(currentLevel >= 1 && currentLevel <= 100, BUG_LEVEL_OVERFLOW, BUG_MEDIUM, currentLevel); // AFTER UPDATE
+    TELEM_ASSERT((int)enemies.size() >= 0, BUG_ENEMY_COUNT_NEGATIVE, BUG_HIGH, (int)enemies.size()); // AFTER UPDATE
+    if (currentState == STATE_BOSS_PLAYING) { // AFTER UPDATE
+        for (const auto &seg : bossSegments) { // AFTER UPDATE
+            TELEM_ASSERT(seg.hp >= 0, BUG_NEGATIVE_HP, BUG_HIGH, seg.hp); // AFTER UPDATE
+        } // AFTER UPDATE
+    } // AFTER UPDATE
+} // AFTER UPDATE
+
 // --------------------------------------------------------------------------
 // 17. SNAPSHOT UPDATE (NEW)
 //     Called at end of each game frame to safely expose state to OLED/Log.
@@ -1156,6 +1684,8 @@ void takeGameSnapshot() {
     g_snapshot.state              = currentState;
     g_snapshot.level              = currentLevel;
     g_snapshot.score              = currentScore;
+    g_snapshot.currentBossTypeVal = currentBossType; // AFTER UPDATE
+    g_snapshot.comboColorVal      = getCurrentComboColorTelemetry(); // AFTER UPDATE
     g_snapshot.enemiesRemaining   = enemies.size();
 
     int mapLevel = currentLevel;
@@ -1167,6 +1697,7 @@ void takeGameSnapshot() {
     if (hpMax <= 0) hpMax = 1;
     g_snapshot.bossHpCurrent      = hpNow;
     g_snapshot.bossHpMax          = hpMax;
+    g_snapshot.activeProjectiles  = shots.size() + bossProjectiles.size() + bonusShots.size(); // AFTER UPDATE
 
     g_snapshot.lvlAchievedScore   = levelAchievedScore;
     g_snapshot.lvlMaxPossibleScore = levelMaxPossibleScore;
@@ -1196,6 +1727,7 @@ void IRAM_ATTR onButtonISR() {
 void vAnalogSensorTask(void *pvParameters) {
     TickType_t xLastWakeTime = xTaskGetTickCount();
     for (;;) {
+        updateTaskHeartbeat(0); // AFTER UPDATE
         int rawVal = analogRead(POT_PIN);
         // Timeout-based queue send (satisfies RTOS timeout requirement)
         xQueueSend(xPotQueue, &rawVal, pdMS_TO_TICKS(10));
@@ -1206,6 +1738,7 @@ void vAnalogSensorTask(void *pvParameters) {
 // --- Task 2: Digital Input (Buttons via ISR + poll fallback) ---
 void vDigitalInputTask(void *pvParameters) {
     for (;;) {
+        updateTaskHeartbeat(1); // AFTER UPDATE
         // Wait for button ISR or poll every 10 ms (timeout-based semaphore take)
         xSemaphoreTake(xButtonISRSem, pdMS_TO_TICKS(10));
 
@@ -1309,7 +1842,7 @@ void vGameProcessingTask(void *pvParameters) {
                     else if (b)           c = 1;
                     else if (r)           c = 2;
                     else if (g)           c = 3;
-                    if (c > 0) { shots.push_back({0.0, c}); queueBuzzerEvent(BUZZER_EVENT_SHOT); lastFireTime = now; }
+                    if (c > 0) { shots.push_back({0.0, c}); queueBuzzerEvent(BUZZER_EVENT_SHOT); lastFireTime = now; pushEvent(EVT_COMBO_TRIGGERED, c); } // AFTER UPDATE
                     buttonsReleased   = false;
                     isWaitingForCombo = false;
                 }
@@ -1337,11 +1870,13 @@ void vGameProcessingTask(void *pvParameters) {
                             enemyFrontIndex += 1.0;
                             flashPixel((int)shots[i].position);
                             remove = true;
+                            pushEvent(EVT_ENEMY_DESTROYED, enemies.size()); // AFTER UPDATE
                             checkWinCondition();
                         } else {
                             enemies.insert(enemies.begin(), {shots[i].color, 0.0, false});
                             enemyFrontIndex -= 1.0;
                             remove = true;
+                            pushEvent(EVT_COMBO_FAILED, shots[i].color); // AFTER UPDATE
                         }
                     }
                 } else if (currentState == STATE_BOSS_PLAYING) {
@@ -1373,6 +1908,7 @@ void vGameProcessingTask(void *pvParameters) {
                                 if (bossSegments[hitIndex].hp <= 0) {
                                     bossSegments.erase(bossSegments.begin() + hitIndex);
                                     if (hitIndex == 0) enemyFrontIndex += 1.0;
+                                    pushEvent(EVT_BOSS_SEGMENT_DESTROYED, hitIndex, (int)bossSegments.size()); // AFTER UPDATE
                                 }
                                 checkWinCondition();
                             } else {
@@ -1578,11 +2114,35 @@ void vGameProcessingTask(void *pvParameters) {
             // FastLED.show() removed — output task handles it
         }
 
+        // --- Update telemetry LED mirror before output renders the frame --- // AFTER UPDATE
+        updateTelemetryLedMirror(); // AFTER UPDATE
+
         // --- Signal output task to render the LED frame ---
         xSemaphoreGive(xRenderSem);
 
         // --- Update snapshot for OLED and logging tasks ---
         takeGameSnapshot();
+
+        // --- Event detection & runtime assertions --- // AFTER UPDATE
+        checkStateTransitionEvents(); // AFTER UPDATE
+        runTelemetryAssertions(); // AFTER UPDATE
+
+        // --- FPS measurement (microsecond precision) --- // AFTER UPDATE
+        static unsigned long frameStartUs = 0; // AFTER UPDATE
+        static unsigned long fpsCounterTime = 0; // AFTER UPDATE
+        static unsigned long fpsFrames = 0; // AFTER UPDATE
+        unsigned long nowUs = micros(); // AFTER UPDATE
+        if (frameStartUs > 0) g_lastFrameTimeUs = nowUs - frameStartUs; // AFTER UPDATE
+        frameStartUs = nowUs; // AFTER UPDATE
+        fpsFrames++; // AFTER UPDATE
+        if (millis() - fpsCounterTime >= 1000) { // AFTER UPDATE
+            g_currentFPS = (float)fpsFrames; // AFTER UPDATE
+            fpsFrames = 0; // AFTER UPDATE
+            fpsCounterTime = millis(); // AFTER UPDATE
+        } // AFTER UPDATE
+
+        // --- Task heartbeat --- // AFTER UPDATE
+        updateTaskHeartbeat(2); // AFTER UPDATE
 
         // --- Increment FPS counter ---
         g_frameCount++;
@@ -1595,6 +2155,7 @@ void vGameProcessingTask(void *pvParameters) {
 // --- Task 4: Output / Actuator (LED rendering) ---
 void vOutputTask(void *pvParameters) {
     for (;;) {
+        updateTaskHeartbeat(3); // AFTER UPDATE
         // Block until game task signals a frame is ready
         xSemaphoreTake(xRenderSem, portMAX_DELAY);
         FastLED.show();
@@ -1604,6 +2165,7 @@ void vOutputTask(void *pvParameters) {
 // --- Task 5: Communication (OLED HUD via I2C) ---
 void vOledCommTask(void *pvParameters) {
     for (;;) {
+        updateTaskHeartbeat(4); // AFTER UPDATE
         if (!oledReady) {
             vTaskDelay(pdMS_TO_TICKS(1000));
             continue;
@@ -1629,6 +2191,7 @@ void vLoggingTask(void *pvParameters) {
     unsigned long lastFrameCount = 0;
 
     for (;;) {
+        updateTaskHeartbeat(5); // AFTER UPDATE
         // Copy snapshot with timeout (demonstrates timeout-based mutex take)
         GameSnapshot snap;
         if (xSemaphoreTake(xSnapshotMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
@@ -1665,6 +2228,7 @@ void vBuzzerTask(void *pvParameters) {
     BuzzerEvent event;
 
     for (;;) {
+        updateTaskHeartbeat(6); // AFTER UPDATE
         if (xQueueReceive(xBuzzerQueue, &event, portMAX_DELAY) != pdTRUE) {
             continue;
         }
@@ -1698,11 +2262,58 @@ void vBuzzerTask(void *pvParameters) {
     }
 }
 
+
+// --- Task 8: WiFi WebSocket Telemetry (Enhanced) --- // AFTER UPDATE
+void vTelemetryTask(void *pvParameters) { // AFTER UPDATE
+    telemetryJsonPacket.reserve(TELEMETRY_JSON_RESERVE_BYTES); // AFTER UPDATE
+    TickType_t xLastTelemetryWakeTime = xTaskGetTickCount(); // AFTER UPDATE
+    for (;;) { // AFTER UPDATE
+        updateTaskHeartbeat(7); // AFTER UPDATE
+        handleTelemetryWiFi(); // AFTER UPDATE
+        if (telemetryWebSocketStarted && WiFi.status() == WL_CONNECTED) { // AFTER UPDATE
+            webSocket.loop(); // AFTER UPDATE
+            unsigned long now = millis(); // AFTER UPDATE
+
+            // --- Drain event queue (instant send) --- // AFTER UPDATE
+            TelemetryEvent evt; // AFTER UPDATE
+            while (xQueueReceive(xEventQueue, &evt, 0) == pdPASS) { // AFTER UPDATE
+                sendEventPacket(evt); // AFTER UPDATE
+            } // AFTER UPDATE
+
+            // --- Drain bug queue (instant send) --- // AFTER UPDATE
+            BugReport bug; // AFTER UPDATE
+            while (xQueueReceive(xBugQueue, &bug, 0) == pdPASS) { // AFTER UPDATE
+                sendBugPacket(bug); // AFTER UPDATE
+            } // AFTER UPDATE
+
+            // --- Gameplay telemetry (100ms) --- // AFTER UPDATE
+            if (now - telemetryTimer >= TELEMETRY_INTERVAL_MS) { // AFTER UPDATE
+                telemetryTimer = now; // AFTER UPDATE
+                sendTelemetry(); // AFTER UPDATE
+            } // AFTER UPDATE
+
+            // --- Diagnostics packet (500ms) --- // AFTER UPDATE
+            if (now - telemetryDiagTimer >= TELEMETRY_DIAG_INTERVAL_MS) { // AFTER UPDATE
+                telemetryDiagTimer = now; // AFTER UPDATE
+                sendDiagnosticsPacket(); // AFTER UPDATE
+            } // AFTER UPDATE
+
+            // --- Serial debug print (3s) --- // AFTER UPDATE
+            if (now - telemetryLastDebugPrint >= 3000) { // AFTER UPDATE
+                telemetryLastDebugPrint = now; // AFTER UPDATE
+                Serial.printf("[TEL] clients=%d packets=%lu fps=%.0f heap=%d rssi=%d\n", webSocket.connectedClients(), telemetryPacketsSent, g_currentFPS, (int)esp_get_free_heap_size(), WiFi.RSSI()); // AFTER UPDATE
+            } // AFTER UPDATE
+        } // AFTER UPDATE
+        vTaskDelayUntil(&xLastTelemetryWakeTime, pdMS_TO_TICKS(5)); // AFTER UPDATE
+    } // AFTER UPDATE
+} // AFTER UPDATE
+
 // --------------------------------------------------------------------------
 // 20. SETUP
 // --------------------------------------------------------------------------
 void setup() {
     Serial.begin(115200);
+    setupWiFi(); // AFTER UPDATE
     initOLED();
 
     pinMode(PIN_BTN_BLUE,  INPUT_PULLUP);
@@ -1740,6 +2351,19 @@ void setup() {
     xInputMutex    = xSemaphoreCreateMutex();
     xSnapshotMutex = xSemaphoreCreateMutex();
     xSerialMutex   = xSemaphoreCreateMutex();
+    xTelemetryMutex = xSemaphoreCreateMutex(); // AFTER UPDATE
+    xEventQueue = xQueueCreate(20, sizeof(TelemetryEvent)); // AFTER UPDATE
+    xBugQueue = xQueueCreate(10, sizeof(BugReport)); // AFTER UPDATE
+
+    // --- Init RTOS task heartbeat names --- // AFTER UPDATE
+    g_taskHeartbeats[0] = {0, 0, "AnalogSensor"}; // AFTER UPDATE
+    g_taskHeartbeats[1] = {0, 0, "DigitalInput"}; // AFTER UPDATE
+    g_taskHeartbeats[2] = {0, 0, "GameProcess"}; // AFTER UPDATE
+    g_taskHeartbeats[3] = {0, 0, "OutputLED"}; // AFTER UPDATE
+    g_taskHeartbeats[4] = {0, 0, "OledComm"}; // AFTER UPDATE
+    g_taskHeartbeats[5] = {0, 0, "Logging"}; // AFTER UPDATE
+    g_taskHeartbeats[6] = {0, 0, "BuzzerSFX"}; // AFTER UPDATE
+    g_taskHeartbeats[7] = {0, 0, "TelemetryWS"}; // AFTER UPDATE
 
     // --- Attach button interrupts (FALLING edge) ---
     attachInterrupt(digitalPinToInterrupt(PIN_BTN_BLUE),  onButtonISR, FALLING);
@@ -1747,14 +2371,15 @@ void setup() {
     attachInterrupt(digitalPinToInterrupt(PIN_BTN_GREEN), onButtonISR, FALLING);
     attachInterrupt(digitalPinToInterrupt(PIN_BTN_WHITE), onButtonISR, FALLING);
 
-    // --- Launch 7 RTOS tasks ---
-    xTaskCreatePinnedToCore(vAnalogSensorTask,  "AnalogSensor",  2048, NULL, 2, &hAnalogTask,  0);
-    xTaskCreatePinnedToCore(vDigitalInputTask,   "DigitalInput",  2048, NULL, 3, &hDigitalTask, 1);
-    xTaskCreatePinnedToCore(vGameProcessingTask, "GameProcess",   8192, NULL, 4, &hGameTask,    1);
-    xTaskCreatePinnedToCore(vOutputTask,          "OutputLED",     2048, NULL, 5, &hOutputTask,  1);
-    xTaskCreatePinnedToCore(vOledCommTask,        "OledComm",      4096, NULL, 2, &hOledTask,    0);
-    xTaskCreatePinnedToCore(vLoggingTask,         "Logging",       3072, NULL, 1, &hLogTask,     0);
-    xTaskCreatePinnedToCore(vBuzzerTask,          "BuzzerSFX",     2048, NULL, 3, &hBuzzerTask,  0);
+    // --- Launch 8 RTOS tasks --- // AFTER UPDATE
+    xTaskCreatePinnedToCore(vAnalogSensorTask,  "AnalogSensor",  3072, NULL, 2, &hAnalogTask,  0); // AFTER UPDATE
+    xTaskCreatePinnedToCore(vDigitalInputTask,   "DigitalInput",  4096, NULL, 3, &hDigitalTask, 1); // AFTER UPDATE
+    xTaskCreatePinnedToCore(vGameProcessingTask, "GameProcess",   16384, NULL, 4, &hGameTask,    1); // AFTER UPDATE
+    xTaskCreatePinnedToCore(vOutputTask,          "OutputLED",     4096, NULL, 5, &hOutputTask,  1); // AFTER UPDATE
+    xTaskCreatePinnedToCore(vOledCommTask,        "OledComm",      6144, NULL, 2, &hOledTask,    0); // AFTER UPDATE
+    xTaskCreatePinnedToCore(vLoggingTask,         "Logging",       4096, NULL, 1, &hLogTask,     0); // AFTER UPDATE
+    xTaskCreatePinnedToCore(vBuzzerTask,          "BuzzerSFX",     3072, NULL, 3, &hBuzzerTask,  0); // AFTER UPDATE
+    xTaskCreatePinnedToCore(vTelemetryTask,       "TelemetryWS",   12288, NULL, 1, &hTelemetryTask, 0); // AFTER UPDATE
 }
 
 // --------------------------------------------------------------------------
