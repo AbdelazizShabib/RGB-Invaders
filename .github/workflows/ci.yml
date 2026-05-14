@@ -5,12 +5,23 @@ on:
   pull_request:
 
 jobs:
-  build-and-test:
+  # -------------------------------------------------------------------------
+  # Job 1: Build ESP32 firmware (compile-check, no device required)
+  # -------------------------------------------------------------------------
+  build-firmware:
+    name: Build ESP32 Firmware
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
+
+      - name: Cache PlatformIO packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.platformio
+          key: pio-${{ runner.os }}-${{ hashFiles('platformio.ini') }}
+          restore-keys: pio-${{ runner.os }}-
 
       - name: Install PlatformIO
         run: pip install platformio
@@ -18,5 +29,135 @@ jobs:
       - name: Build ESP32 Firmware
         run: platformio run -e freenove_esp32_s3_wroom
 
+      - name: Upload firmware artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-bin
+          path: .pio/build/freenove_esp32_s3_wroom/firmware.bin
+          retention-days: 7
+
+  # -------------------------------------------------------------------------
+  # Job 2: Native unit tests (pure logic, no hardware)
+  # -------------------------------------------------------------------------
+  native-tests:
+    name: Native Unit Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Cache PlatformIO packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.platformio
+          key: pio-${{ runner.os }}-${{ hashFiles('platformio.ini') }}
+          restore-keys: pio-${{ runner.os }}-
+
+      - name: Install PlatformIO
+        run: pip install platformio
+
       - name: Run Native Unit Tests
-        run: platformio test -e native
+        run: platformio test -e native --verbose
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-test-results
+          path: .pio/build/native/
+          retention-days: 7
+
+  # -------------------------------------------------------------------------
+  # Job 3: Compile-check ESP32 test environments (no device required)
+  # Verifies that RTOS/hardware test code at least compiles correctly.
+  # -------------------------------------------------------------------------
+  compile-esp32-tests:
+    name: Compile ESP32 Test Environments
+    runs-on: ubuntu-latest
+    needs: build-firmware
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Cache PlatformIO packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.platformio
+          key: pio-${{ runner.os }}-${{ hashFiles('platformio.ini') }}
+          restore-keys: pio-${{ runner.os }}-
+
+      - name: Install PlatformIO
+        run: pip install platformio
+
+      - name: Compile esp32-test environment
+        run: platformio run -e esp32-test
+
+      - name: Compile stress-test environment
+        run: platformio run -e stress-test
+
+  # -------------------------------------------------------------------------
+  # Job 4: Static analysis with cppcheck
+  # -------------------------------------------------------------------------
+  static-analysis:
+    name: Static Analysis
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install cppcheck
+        run: sudo apt-get install -y cppcheck
+
+      - name: Run cppcheck on lib/
+        run: |
+          cppcheck \
+            --enable=warning,style,performance \
+            --std=c++17 \
+            --suppress=missingIncludeSystem \
+            --suppress=unmatchedSuppression \
+            --error-exitcode=1 \
+            lib/game_logic/
+
+      - name: Run cppcheck on test/ (native targets only)
+        run: |
+          cppcheck \
+            --enable=warning,style,performance \
+            --std=c++17 \
+            --suppress=missingIncludeSystem \
+            --suppress=unmatchedSuppression \
+            --error-exitcode=0 \
+            test/test_simon_stage/ \
+            test/test_combo_color/ \
+            test/test_score_rank/ \
+            test/test_level_score/ \
+            test/test_led_color_id/ \
+            test/test_accuracy/ \
+            test/test_win_condition/
+
+  # -------------------------------------------------------------------------
+  # Summary gate: all required jobs must pass
+  # -------------------------------------------------------------------------
+  ci-gate:
+    name: CI Gate
+    runs-on: ubuntu-latest
+    needs:
+      - build-firmware
+      - native-tests
+      - compile-esp32-tests
+      - static-analysis
+    if: always()
+
+    steps:
+      - name: Check all jobs passed
+        run: |
+          if [[ "${{ needs.build-firmware.result }}"       != "success" ||
+                "${{ needs.native-tests.result }}"         != "success" ||
+                "${{ needs.compile-esp32-tests.result }}"  != "success" ||
+                "${{ needs.static-analysis.result }}"      != "success" ]]; then
+            echo "One or more CI jobs failed."
+            exit 1
+          fi
+          echo "All CI jobs passed."
