@@ -6,6 +6,10 @@ on:
 
 jobs:
 
+  # =============================================================================
+  # ROOT BUILD STAGE
+  # =============================================================================
+
   firmware-build:
     name: Build ESP32 Firmware
     runs-on: ubuntu-latest
@@ -26,6 +30,10 @@ jobs:
         run: platformio run -e freenove_esp32_s3_wroom
 
 
+  # =============================================================================
+  # CORE VALIDATION LAYER
+  # =============================================================================
+
   native-tests:
     name: Native Logic Tests
     runs-on: ubuntu-latest
@@ -34,16 +42,13 @@ jobs:
       - firmware-build
 
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Install Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install PlatformIO
-        run: pip install platformio
+      - run: pip install platformio
 
       - name: Run Native Unit Tests
         run: platformio test -e native
@@ -57,28 +62,28 @@ jobs:
       - firmware-build
 
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Install Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install PlatformIO
-        run: pip install platformio
+      - run: pip install platformio
 
       - name: Run Static Analysis
         run: platformio check -e freenove_esp32_s3_wroom
 
+
+  # =============================================================================
+  # RTOS VALIDATION LAYER (PARALLEL)
+  # =============================================================================
 
   queue-validation:
     name: Queue Validation
     runs-on: ubuntu-latest
 
     needs:
-      - native-tests
-      - static-analysis
+      - firmware-build
 
     steps:
       - uses: actions/checkout@v4
@@ -98,7 +103,7 @@ jobs:
     runs-on: ubuntu-latest
 
     needs:
-      - queue-validation
+      - firmware-build
 
     steps:
       - uses: actions/checkout@v4
@@ -118,7 +123,7 @@ jobs:
     runs-on: ubuntu-latest
 
     needs:
-      - semaphore-validation
+      - firmware-build
 
     steps:
       - uses: actions/checkout@v4
@@ -138,7 +143,7 @@ jobs:
     runs-on: ubuntu-latest
 
     needs:
-      - mutex-validation
+      - firmware-build
 
     steps:
       - uses: actions/checkout@v4
@@ -153,12 +158,17 @@ jobs:
         run: platformio run -e esp32-test
 
 
+  # =============================================================================
+  # SYSTEM VALIDATION LAYER
+  # =============================================================================
+
   timing-validation:
     name: Timing Validation
     runs-on: ubuntu-latest
 
     needs:
-      - task-validation
+      - queue-validation
+      - semaphore-validation
 
     steps:
       - uses: actions/checkout@v4
@@ -178,6 +188,7 @@ jobs:
     runs-on: ubuntu-latest
 
     needs:
+      - mutex-validation
       - task-validation
 
     steps:
@@ -198,8 +209,8 @@ jobs:
     runs-on: ubuntu-latest
 
     needs:
-      - timing-validation
-      - multicore-validation
+      - queue-validation
+      - task-validation
 
     steps:
       - uses: actions/checkout@v4
@@ -214,11 +225,17 @@ jobs:
         run: platformio run -e esp32-test
 
 
+  # =============================================================================
+  # RELIABILITY VALIDATION LAYER
+  # =============================================================================
+
   fault-injection-validation:
     name: Fault Injection Validation
     runs-on: ubuntu-latest
 
     needs:
+      - timing-validation
+      - multicore-validation
       - hardware-init-validation
 
     steps:
@@ -254,11 +271,17 @@ jobs:
         run: platformio run -e stress-test
 
 
+  # =============================================================================
+  # FINAL GATE
+  # =============================================================================
+
   ci-gate:
     name: CI Gate
     runs-on: ubuntu-latest
 
     needs:
+      - native-tests
+      - static-analysis
       - stress-validation
 
     steps:
