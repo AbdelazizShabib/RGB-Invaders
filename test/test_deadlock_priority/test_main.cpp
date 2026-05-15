@@ -147,10 +147,11 @@ void test_abba_lock_order_causes_deadlock(void)
     xSemaphoreTake(s_A_done, portMAX_DELAY);
     xSemaphoreTake(s_B_done, portMAX_DELAY);
 
-    Serial.printf("\n[DEADLOCK] ABBA result: A_got_M2=%s  B_got_M1=%s\n",
-                  s_A_got_M2 ? "YES" : "TIMEOUT",
-                  s_B_got_M1 ? "YES" : "TIMEOUT");
-    Serial.printf("[DEADLOCK] Both timed out — deadlock confirmed.\n\n");
+    Serial.printf("\n[DEADLOCK] ABBA lock ordering (200ms timeout each):\n");
+    Serial.printf("           A holds M1, tries M2 -> %s\n", s_A_got_M2 ? "acquired" : "TIMED OUT");
+    Serial.printf("           B holds M2, tries M1 -> %s\n", s_B_got_M1 ? "acquired" : "TIMED OUT");
+    Serial.printf("           Result: %s\n\n",
+                  (!s_A_got_M2 && !s_B_got_M1) ? "DEADLOCK CONFIRMED (both timed out)" : "no deadlock (unexpected)");
 
     // Neither task should have successfully acquired the second lock.
     TEST_ASSERT_FALSE(s_A_got_M2);
@@ -211,7 +212,8 @@ void test_consistent_lock_order_prevents_deadlock(void)
     BaseType_t ok1 = xSemaphoreTake(s_fixed_done1, pdMS_TO_TICKS(2000));
     BaseType_t ok2 = xSemaphoreTake(s_fixed_done2, pdMS_TO_TICKS(2000));
 
-    Serial.printf("[DEADLOCK] FIXED ORDER: taskA done=%s  taskB done=%s  work_count=%d\n\n",
+    Serial.printf("[DEADLOCK] CONSISTENT ORDER (M1 then M2 always):\n");
+    Serial.printf("           taskA done=%s  taskB done=%s  work_count=%d (expected 2)\n\n",
                   ok1 == pdTRUE ? "YES" : "TIMEOUT",
                   ok2 == pdTRUE ? "YES" : "TIMEOUT",
                   s_fixed_work_count);
@@ -357,11 +359,13 @@ void test_priority_inversion_binary_semaphore(void)
     // Ideal wait: time remaining in LOW's hold after HIGH starts trying.
     int64_t ideal_wait_ms = LOW_HOLD_MS - HIGH_START_MS; // 170 ms
 
-    Serial.printf("\n[PRIO-INV] BINARY SEM (no PIP):\n");
-    Serial.printf("           Ideal wait = %lld ms\n", ideal_wait_ms);
-    Serial.printf("           Actual wait = %lld ms\n", wait_ms);
-    Serial.printf("           Extra delay (inversion) = %lld ms\n\n",
-                  wait_ms - ideal_wait_ms);
+    int64_t extra_ms = wait_ms - ideal_wait_ms;
+    Serial.printf("\n[PRIO-INV] BINARY SEM (no priority inheritance):\n");
+    Serial.printf("           LOW holds lock for %d ms, HIGH waits from %d ms in\n",
+                  LOW_HOLD_MS, HIGH_START_MS);
+    Serial.printf("           Ideal wait  = %lld ms  (remaining hold time)\n", ideal_wait_ms);
+    Serial.printf("           Actual wait = %lld ms  (MED spinner delayed LOW)\n", wait_ms);
+    Serial.printf("           Extra delay = %lld ms  <- PRIORITY INVERSION\n\n", extra_ms);
 
     // The HIGH task's actual wait should be substantially more than the ideal
     // because MED (250 ms spinner) blocked LOW from releasing the lock early.
@@ -389,11 +393,12 @@ void test_priority_inheritance_mutex_limits_inversion(void)
 
     int64_t ideal_wait_ms = LOW_HOLD_MS - HIGH_START_MS; // 170 ms
 
-    Serial.printf("[PRIO-INV] MUTEX (PIP active):\n");
-    Serial.printf("           Ideal wait = %lld ms\n", ideal_wait_ms);
-    Serial.printf("           Actual wait = %lld ms\n", wait_ms);
-    Serial.printf("           Overhead above ideal = %lld ms\n\n",
-                  wait_ms - ideal_wait_ms);
+    int64_t overhead_ms = wait_ms - ideal_wait_ms;
+    Serial.printf("[PRIO-INV] MUTEX (priority inheritance active):\n");
+    Serial.printf("           LOW inherits HIGH's priority (7) -> preempts MED (5)\n");
+    Serial.printf("           Ideal wait  = %lld ms\n", ideal_wait_ms);
+    Serial.printf("           Actual wait = %lld ms  overhead=%lld ms  (limit <=50ms)\n\n",
+                  wait_ms, overhead_ms);
 
     // With PIP the wait should be close to ideal (within ~50 ms scheduling noise).
     // It must be much shorter than the binary-semaphore case.

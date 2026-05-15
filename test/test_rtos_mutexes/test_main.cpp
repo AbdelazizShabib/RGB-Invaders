@@ -14,6 +14,7 @@ void tearDown(void) {}
 void test_mutex_create_non_null(void)
 {
     SemaphoreHandle_t m = xSemaphoreCreateMutex();
+    Serial.printf("  xSemaphoreCreateMutex() = %s\n", m ? "non-NULL (OK)" : "NULL (FAIL)");
     TEST_ASSERT_NOT_NULL(m);
     vSemaphoreDelete(m);
 }
@@ -21,6 +22,7 @@ void test_mutex_create_non_null(void)
 void test_recursive_mutex_create_non_null(void)
 {
     SemaphoreHandle_t m = xSemaphoreCreateRecursiveMutex();
+    Serial.printf("  xSemaphoreCreateRecursiveMutex() = %s\n", m ? "non-NULL (OK)" : "NULL (FAIL)");
     TEST_ASSERT_NOT_NULL(m);
     vSemaphoreDelete(m);
 }
@@ -32,8 +34,13 @@ void test_recursive_mutex_create_non_null(void)
 void test_mutex_take_and_give_succeeds(void)
 {
     SemaphoreHandle_t m = xSemaphoreCreateMutex();
-    TEST_ASSERT_EQUAL(pdTRUE, xSemaphoreTake(m, 0));
-    TEST_ASSERT_EQUAL(pdTRUE, xSemaphoreGive(m));
+    BaseType_t take_result = xSemaphoreTake(m, 0);
+    BaseType_t give_result = xSemaphoreGive(m);
+    Serial.printf("  take=%s  give=%s\n",
+                  take_result == pdTRUE ? "pdTRUE" : "pdFALSE",
+                  give_result == pdTRUE ? "pdTRUE" : "pdFALSE");
+    TEST_ASSERT_EQUAL(pdTRUE, take_result);
+    TEST_ASSERT_EQUAL(pdTRUE, give_result);
     vSemaphoreDelete(m);
 }
 
@@ -44,15 +51,29 @@ void test_mutex_take_and_give_succeeds(void)
 void test_recursive_mutex_reentrant_take(void)
 {
     SemaphoreHandle_t m = xSemaphoreCreateRecursiveMutex();
-    TEST_ASSERT_EQUAL(pdTRUE, xSemaphoreTakeRecursive(m, 0));
-    TEST_ASSERT_EQUAL(pdTRUE, xSemaphoreTakeRecursive(m, 0));
-    TEST_ASSERT_EQUAL(pdTRUE, xSemaphoreTakeRecursive(m, 0));
-    // Must give exactly as many times as taken
-    TEST_ASSERT_EQUAL(pdTRUE, xSemaphoreGiveRecursive(m));
-    TEST_ASSERT_EQUAL(pdTRUE, xSemaphoreGiveRecursive(m));
-    TEST_ASSERT_EQUAL(pdTRUE, xSemaphoreGiveRecursive(m));
-    // Fully released — another task could take it now
-    TEST_ASSERT_EQUAL(pdTRUE, xSemaphoreTakeRecursive(m, 0));
+    BaseType_t t1 = xSemaphoreTakeRecursive(m, 0);
+    BaseType_t t2 = xSemaphoreTakeRecursive(m, 0);
+    BaseType_t t3 = xSemaphoreTakeRecursive(m, 0);
+    Serial.printf("  recursive take x3: [%s, %s, %s]  (all pdTRUE = re-entrant)\n",
+                  t1 == pdTRUE ? "OK" : "FAIL",
+                  t2 == pdTRUE ? "OK" : "FAIL",
+                  t3 == pdTRUE ? "OK" : "FAIL");
+    TEST_ASSERT_EQUAL(pdTRUE, t1);
+    TEST_ASSERT_EQUAL(pdTRUE, t2);
+    TEST_ASSERT_EQUAL(pdTRUE, t3);
+    BaseType_t g1 = xSemaphoreGiveRecursive(m);
+    BaseType_t g2 = xSemaphoreGiveRecursive(m);
+    BaseType_t g3 = xSemaphoreGiveRecursive(m);
+    Serial.printf("  recursive give x3: [%s, %s, %s]  (all pdTRUE = fully released)\n",
+                  g1 == pdTRUE ? "OK" : "FAIL",
+                  g2 == pdTRUE ? "OK" : "FAIL",
+                  g3 == pdTRUE ? "OK" : "FAIL");
+    TEST_ASSERT_EQUAL(pdTRUE, g1);
+    TEST_ASSERT_EQUAL(pdTRUE, g2);
+    TEST_ASSERT_EQUAL(pdTRUE, g3);
+    BaseType_t retake = xSemaphoreTakeRecursive(m, 0);
+    Serial.printf("  after full release: take again = %s\n", retake == pdTRUE ? "pdTRUE (OK)" : "pdFALSE");
+    TEST_ASSERT_EQUAL(pdTRUE, retake);
     xSemaphoreGiveRecursive(m);
     vSemaphoreDelete(m);
 }
@@ -64,17 +85,8 @@ void test_recursive_mutex_reentrant_take(void)
 void test_mutex_take_timeout_when_held(void)
 {
     SemaphoreHandle_t m = xSemaphoreCreateMutex();
-    xSemaphoreTake(m, 0); // hold it
-
-    TickType_t before = xTaskGetTickCount();
-    // Second take from same task is undefined behaviour for a regular mutex
-    // but here we just measure that the timeout fires (it blocks immediately).
-    // NOTE: On FreeRTOS, taking a mutex you already hold from the same task
-    // will deadlock with a non-recursive mutex.  We release first, then test
-    // timeout with zero additional takers — instead measure via a separate task.
-    xSemaphoreGive(m); // release so we don't deadlock
-
-    // Now hold it again and launch a task that tries with 50 ms timeout
+    xSemaphoreTake(m, 0);
+    xSemaphoreGive(m);
     xSemaphoreTake(m, 0);
 
     volatile bool contender_timed_out = false;
@@ -86,12 +98,16 @@ void test_mutex_take_timeout_when_held(void)
 
     xTaskCreate([](void *p) {
         auto *a = (struct Args *)p;
+        TickType_t t0 = xTaskGetTickCount();
         BaseType_t ok = xSemaphoreTake(a->m, pdMS_TO_TICKS(50));
+        TickType_t elapsed_ms = (xTaskGetTickCount() - t0) * portTICK_PERIOD_MS;
+        Serial.printf("  contender: take result=%s  waited=%u ms  (50ms timeout)\n",
+                      ok == pdFALSE ? "TIMEOUT (expected)" : "acquired (unexpected)",
+                      elapsed_ms);
         if (ok == pdFALSE) *a->flag = true;
         vTaskDelete(NULL);
     }, "contend", 2048, &args, 5, NULL);
 
-    // Wait long enough for the contender to timeout
     vTaskDelay(pdMS_TO_TICKS(150));
     xSemaphoreGive(m);
 
@@ -133,12 +149,13 @@ void test_mutex_guards_shared_counter(void)
         xSemaphoreGive(s_counter_mutex);
     }
 
-    // Wait for worker task to finish
     uint32_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(2000);
     while (!s_worker_done && xTaskGetTickCount() < deadline) {
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 
+    Serial.printf("  2 tasks × 1000 increments each  ->  counter=%d  (expected 2000)  worker_done=%s\n",
+                  s_shared_counter, s_worker_done ? "YES" : "NO (timeout)");
     TEST_ASSERT_TRUE(s_worker_done);
     TEST_ASSERT_EQUAL(2000, s_shared_counter);
     vSemaphoreDelete(s_counter_mutex);
@@ -153,8 +170,10 @@ void test_mutex_give_after_take_restores_availability(void)
     SemaphoreHandle_t m = xSemaphoreCreateMutex();
     xSemaphoreTake(m, 0);
     xSemaphoreGive(m);
-    // After give, a third party should be able to take it
-    TEST_ASSERT_EQUAL(pdTRUE, xSemaphoreTake(m, 0));
+    BaseType_t result = xSemaphoreTake(m, 0);
+    Serial.printf("  take after give: result=%s  (mutex available again)\n",
+                  result == pdTRUE ? "pdTRUE (OK)" : "pdFALSE (FAIL)");
+    TEST_ASSERT_EQUAL(pdTRUE, result);
     xSemaphoreGive(m);
     vSemaphoreDelete(m);
 }
@@ -166,6 +185,7 @@ void test_mutex_give_after_take_restores_availability(void)
 void setup()
 {
     delay(2000);
+    Serial.println("\n=== RTOS Mutex Tests ===");
     UNITY_BEGIN();
     RUN_TEST(test_mutex_create_non_null);
     RUN_TEST(test_recursive_mutex_create_non_null);

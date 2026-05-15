@@ -18,7 +18,9 @@ void test_esp_timer_advances(void)
     int64_t t0 = esp_timer_get_time();
     vTaskDelay(pdMS_TO_TICKS(10));
     int64_t t1 = esp_timer_get_time();
-    TEST_ASSERT_GREATER_THAN(0, t1 - t0);
+    int64_t delta = t1 - t0;
+    Serial.printf("  esp_timer: t0=%lld µs  t1=%lld µs  delta=%lld µs  (> 0)\n", t0, t1, delta);
+    TEST_ASSERT_GREATER_THAN(0, delta);
 }
 
 void test_esp_timer_10ms_delay_accuracy(void)
@@ -26,7 +28,8 @@ void test_esp_timer_10ms_delay_accuracy(void)
     int64_t t0 = esp_timer_get_time();
     vTaskDelay(pdMS_TO_TICKS(10));
     int64_t elapsed_us = esp_timer_get_time() - t0;
-    // 10 ms = 10000 µs; allow +5 ms jitter on either side
+    Serial.printf("  10ms delay: elapsed=%lld µs  target=10000 µs  tolerance=[8000..15000]\n",
+                  elapsed_us);
     TEST_ASSERT_GREATER_OR_EQUAL(8000,  elapsed_us);
     TEST_ASSERT_LESS_OR_EQUAL   (15000, elapsed_us);
 }
@@ -36,6 +39,8 @@ void test_esp_timer_50ms_delay_accuracy(void)
     int64_t t0 = esp_timer_get_time();
     vTaskDelay(pdMS_TO_TICKS(50));
     int64_t elapsed_us = esp_timer_get_time() - t0;
+    Serial.printf("  50ms delay: elapsed=%lld µs  target=50000 µs  tolerance=[45000..60000]\n",
+                  elapsed_us);
     TEST_ASSERT_GREATER_OR_EQUAL(45000, elapsed_us);
     TEST_ASSERT_LESS_OR_EQUAL   (60000, elapsed_us);
 }
@@ -52,7 +57,7 @@ static volatile int64_t  s_take_time_us;
 
 static void latency_giver(void *param)
 {
-    vTaskDelay(pdMS_TO_TICKS(20)); // brief warmup
+    vTaskDelay(pdMS_TO_TICKS(20));
     s_give_time_us = esp_timer_get_time();
     xSemaphoreGive(s_latency_sem);
     vTaskDelete(NULL);
@@ -66,12 +71,12 @@ void test_semaphore_wake_latency_under_1ms(void)
 
     xTaskCreatePinnedToCore(latency_giver, "giver", 2048, NULL, 6, NULL, 1);
 
-    // Block on core 0; giver fires from core 1
     xSemaphoreTake(s_latency_sem, portMAX_DELAY);
     s_take_time_us = esp_timer_get_time();
 
     int64_t latency_us = s_take_time_us - s_give_time_us;
-    // Cross-core wake should complete under 1 ms (1000 µs) on ESP32-S3
+    Serial.printf("  semaphore wake latency (core1->core0): give=%lld µs  take=%lld µs  latency=%lld µs  (limit <1000µs)\n",
+                  s_give_time_us, s_take_time_us, latency_us);
     TEST_ASSERT_GREATER_OR_EQUAL(0,    latency_us);
     TEST_ASSERT_LESS_OR_EQUAL   (1000, latency_us);
 
@@ -107,6 +112,8 @@ void test_queue_delivery_latency_under_1ms(void)
     int64_t recv_time_us = esp_timer_get_time();
 
     int64_t latency_us = recv_time_us - s_send_time_us;
+    Serial.printf("  queue delivery latency (core1->core0): send=%lld µs  recv=%lld µs  latency=%lld µs  (limit <1000µs)\n",
+                  s_send_time_us, recv_time_us, latency_us);
     TEST_ASSERT_EQUAL_UINT32(0xBEEFu, recv);
     TEST_ASSERT_GREATER_OR_EQUAL(0,    latency_us);
     TEST_ASSERT_LESS_OR_EQUAL   (1000, latency_us);
@@ -115,12 +122,12 @@ void test_queue_delivery_latency_under_1ms(void)
 }
 
 // ---------------------------------------------------------------------------
-// vTaskDelayUntil period drift — run 10 iterations, check cumulative drift
+// vTaskDelayUntil period drift — run 20 iterations, check cumulative drift
 // ---------------------------------------------------------------------------
 
 void test_task_delay_until_low_drift(void)
 {
-    const TickType_t PERIOD  = pdMS_TO_TICKS(16); // ~60 FPS target
+    const TickType_t PERIOD  = pdMS_TO_TICKS(16);
     const int        ITERS   = 20;
     int64_t expected_us = 16000LL * ITERS;
 
@@ -131,8 +138,12 @@ void test_task_delay_until_low_drift(void)
     }
     int64_t elapsed_us = esp_timer_get_time() - t0;
 
-    // Tolerate ±10 % drift over 20 iterations
-    int64_t tolerance = expected_us / 10;
+    int64_t tolerance    = expected_us / 10;
+    int64_t drift_us     = elapsed_us - expected_us;
+    float   drift_pct    = 100.0f * drift_us / expected_us;
+
+    Serial.printf("  vTaskDelayUntil: %d x 16ms  expected=%lld µs  elapsed=%lld µs  drift=%lld µs (%.1f%%)  tolerance=±10%%\n",
+                  ITERS, expected_us, elapsed_us, drift_us, drift_pct);
     TEST_ASSERT_INT_WITHIN(tolerance, expected_us, elapsed_us);
 }
 
@@ -143,6 +154,7 @@ void test_task_delay_until_low_drift(void)
 void setup()
 {
     delay(2000);
+    Serial.println("\n=== Timing Accuracy Tests ===");
     UNITY_BEGIN();
     RUN_TEST(test_esp_timer_advances);
     RUN_TEST(test_esp_timer_10ms_delay_accuracy);

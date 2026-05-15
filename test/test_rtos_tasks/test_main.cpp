@@ -27,6 +27,7 @@ void test_task_create_and_run(void)
     s_done_sem = xSemaphoreCreateBinary();
     xTaskCreate(minimal_task, "min", 2048, NULL, 5, NULL);
     xSemaphoreTake(s_done_sem, pdMS_TO_TICKS(500));
+    Serial.printf("  task created and ran: task_ran=%s\n", s_task_ran ? "true (OK)" : "false (FAIL)");
     TEST_ASSERT_TRUE(s_task_ran);
     vSemaphoreDelete(s_done_sem);
 }
@@ -50,6 +51,7 @@ void test_task_pinned_to_core_0_runs_on_core_0(void)
     s_done_sem = xSemaphoreCreateBinary();
     xTaskCreatePinnedToCore(core_check_task, "c0", 2048, NULL, 5, NULL, 0);
     xSemaphoreTake(s_done_sem, pdMS_TO_TICKS(500));
+    Serial.printf("  task pinned to core 0: ran on core %d  (expected 0)\n", s_core_id_seen);
     TEST_ASSERT_EQUAL(0, s_core_id_seen);
     vSemaphoreDelete(s_done_sem);
 }
@@ -60,6 +62,7 @@ void test_task_pinned_to_core_1_runs_on_core_1(void)
     s_done_sem = xSemaphoreCreateBinary();
     xTaskCreatePinnedToCore(core_check_task, "c1", 2048, NULL, 5, NULL, 1);
     xSemaphoreTake(s_done_sem, pdMS_TO_TICKS(500));
+    Serial.printf("  task pinned to core 1: ran on core %d  (expected 1)\n", s_core_id_seen);
     TEST_ASSERT_EQUAL(1, s_core_id_seen);
     vSemaphoreDelete(s_done_sem);
 }
@@ -72,7 +75,6 @@ static volatile UBaseType_t s_watermark = 0;
 
 static void watermark_task(void *param)
 {
-    // Do some non-trivial work to actually consume a bit of stack
     volatile uint8_t buf[64];
     for (int i = 0; i < 64; i++) buf[i] = (uint8_t)i;
     (void)buf;
@@ -87,7 +89,8 @@ void test_task_stack_watermark_above_zero(void)
     s_done_sem  = xSemaphoreCreateBinary();
     xTaskCreate(watermark_task, "wm", 4096, NULL, 5, NULL);
     xSemaphoreTake(s_done_sem, pdMS_TO_TICKS(500));
-    // Must have at least 64 words free (256 bytes) to be healthy
+    Serial.printf("  stack high-water mark = %u words  (%u bytes remaining, min 64 words required)\n",
+                  s_watermark, s_watermark * sizeof(StackType_t));
     TEST_ASSERT_GREATER_THAN(64, s_watermark);
     vSemaphoreDelete(s_done_sem);
 }
@@ -109,7 +112,6 @@ static void high_prio_task(void *param)
 static void low_prio_spin_task(void *param)
 {
     s_low_spin_active = true;
-    // Spin with yield to allow scheduler to run higher priority task
     while (!s_high_prio_ran) {
         taskYIELD();
     }
@@ -122,13 +124,13 @@ void test_high_priority_task_runs_before_low(void)
     s_low_spin_active = false;
     s_done_sem        = xSemaphoreCreateBinary();
 
-    // Create low-priority task first
     xTaskCreate(low_prio_spin_task, "low",  2048, NULL, 3, NULL);
-    vTaskDelay(pdMS_TO_TICKS(10)); // let low task start spinning
-
-    // Now create high-priority task — should preempt immediately
+    vTaskDelay(pdMS_TO_TICKS(10));
     xTaskCreate(high_prio_task, "high", 2048, NULL, 7, NULL);
     BaseType_t ok = xSemaphoreTake(s_done_sem, pdMS_TO_TICKS(500));
+    Serial.printf("  high-prio(7) created after low-prio(3): high ran=%s  result=%s\n",
+                  s_high_prio_ran ? "true" : "false",
+                  ok == pdTRUE ? "pdTRUE (preempted low)" : "TIMEOUT");
     TEST_ASSERT_EQUAL(pdTRUE, ok);
     TEST_ASSERT_TRUE(s_high_prio_ran);
     vSemaphoreDelete(s_done_sem);
@@ -150,8 +152,8 @@ void test_vtask_delay_until_period(void)
 
     TickType_t after   = xTaskGetTickCount();
     uint32_t elapsed_ms = (after - before) * portTICK_PERIOD_MS;
-
-    // 5 × 20 ms = 100 ms; allow ±15 ms scheduling jitter
+    Serial.printf("  vTaskDelayUntil: 5 x 20ms = %u ms elapsed  (expected ~100ms, tolerance ±15ms)\n",
+                  elapsed_ms);
     TEST_ASSERT_GREATER_OR_EQUAL(85, elapsed_ms);
     TEST_ASSERT_LESS_OR_EQUAL(130, elapsed_ms);
 }
@@ -163,6 +165,7 @@ void test_vtask_delay_until_period(void)
 void setup()
 {
     delay(2000);
+    Serial.println("\n=== RTOS Task Tests ===");
     UNITY_BEGIN();
     RUN_TEST(test_task_create_and_run);
     RUN_TEST(test_task_pinned_to_core_0_runs_on_core_0);

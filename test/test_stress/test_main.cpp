@@ -47,14 +47,19 @@ void test_queue_flood_no_data_loss(void)
 
     xTaskCreatePinnedToCore(flood_consumer, "flood_cons", 4096, NULL, 6, NULL, 1);
 
+    int64_t t0 = esp_timer_get_time();
     for (uint32_t i = 0; i < FLOOD_ITEMS; i++) {
-        // Block until space — don't drop under back-pressure
         while (xQueueSend(s_flood_q, &i, pdMS_TO_TICKS(10)) != pdTRUE) {
             taskYIELD();
         }
     }
 
     xSemaphoreTake(s_flood_done, pdMS_TO_TICKS(10000));
+    int64_t elapsed_ms = (esp_timer_get_time() - t0) / 1000;
+    Serial.printf("  queue flood: sent=%d  received=%u  errors=%u  elapsed=%lld ms  (throughput=%.0f items/s)\n",
+                  FLOOD_ITEMS, s_flood_received, s_flood_errors,
+                  elapsed_ms,
+                  elapsed_ms > 0 ? 1000.0 * FLOOD_ITEMS / elapsed_ms : 0.0);
     TEST_ASSERT_EQUAL(FLOOD_ITEMS, s_flood_received);
     TEST_ASSERT_EQUAL(0, s_flood_errors);
 
@@ -89,10 +94,8 @@ void test_isr_burst_semaphore_gives(void)
     args.name     = "burst";
     esp_timer_create(&args, &s_burst_timer);
 
-    // Fire every 500 µs for BURST_COUNT events = 100 ms total
     esp_timer_start_periodic(s_burst_timer, 500);
 
-    // Drain all gives within a reasonable window
     uint32_t deadline_ms = 300;
     TickType_t deadline  = xTaskGetTickCount() + pdMS_TO_TICKS(deadline_ms);
     while (s_burst_taken < BURST_COUNT && xTaskGetTickCount() < deadline) {
@@ -104,8 +107,11 @@ void test_isr_burst_semaphore_gives(void)
     esp_timer_stop(s_burst_timer);
     esp_timer_delete(s_burst_timer);
 
-    // Allow up to 5 % loss due to counting semaphore saturation (max=BURST_COUNT)
-    TEST_ASSERT_GREATER_OR_EQUAL(BURST_COUNT * 95 / 100, s_burst_taken);
+    uint32_t min_expected = BURST_COUNT * 95 / 100;
+    Serial.printf("  ISR burst: fired=%d  taken=%u  loss=%u  min_allowed=%u  (<%d%% loss)\n",
+                  BURST_COUNT, s_burst_taken, BURST_COUNT - s_burst_taken,
+                  min_expected, 5);
+    TEST_ASSERT_GREATER_OR_EQUAL(min_expected, s_burst_taken);
 
     vSemaphoreDelete(s_burst_sem);
 }
@@ -129,8 +135,9 @@ void test_heap_stable_under_repeated_alloc_free(void)
     }
 
     size_t free_after = heap_caps_get_free_size(MALLOC_CAP_DEFAULT);
-    // Allow at most 1 KB of permanent heap loss after 500 cycles
     int32_t lost = (int32_t)free_before - (int32_t)free_after;
+    Serial.printf("  heap stress: %d cycles x %d bytes  before=%u  after=%u  permanent_loss=%d bytes  (limit <=1024)\n",
+                  ALLOC_CYCLES, ALLOC_SIZE, free_before, free_after, lost);
     TEST_ASSERT_LESS_OR_EQUAL(1024, lost);
 }
 
@@ -140,7 +147,7 @@ void test_heap_stable_under_repeated_alloc_free(void)
 
 static int deep_recurse(int depth)
 {
-    volatile uint8_t pad[32]; // force some stack use per frame
+    volatile uint8_t pad[32];
     (void)pad;
     if (depth == 0) return 0;
     return 1 + deep_recurse(depth - 1);
@@ -151,7 +158,7 @@ static SemaphoreHandle_t  s_recurse_done;
 
 static void recurse_task(void *param)
 {
-    s_recurse_result = deep_recurse(60); // 60 frames × ~80 bytes ≈ 4.8 KB
+    s_recurse_result = deep_recurse(60);
     xSemaphoreGive(s_recurse_done);
     vTaskDelete(NULL);
 }
@@ -160,9 +167,10 @@ void test_deep_recursion_does_not_overflow_8k_stack(void)
 {
     s_recurse_result = -1;
     s_recurse_done   = xSemaphoreCreateBinary();
-    // Provide 8 KB stack to be safe
     xTaskCreate(recurse_task, "recurse", 8192, NULL, 5, NULL);
     xSemaphoreTake(s_recurse_done, pdMS_TO_TICKS(2000));
+    Serial.printf("  deep_recurse(60) = %d  (60 frames x ~80 bytes ~4.8KB on 8KB stack)\n",
+                  s_recurse_result);
     TEST_ASSERT_EQUAL(60, s_recurse_result);
     vSemaphoreDelete(s_recurse_done);
 }
@@ -196,18 +204,21 @@ void test_four_tasks_contending_mutex_consistency(void)
     s_contend_total      = 0;
     s_contend_tasks_done = 0;
 
+    int64_t t0 = esp_timer_get_time();
     for (int i = 0; i < 4; i++) {
         xTaskCreate(contend_task, "ctd", 2048, NULL, 5, NULL);
     }
 
-    // Wait for all 4 tasks to finish (each sets tasks_done under mutex)
     TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(10000);
     while (s_contend_tasks_done < 4 && xTaskGetTickCount() < deadline) {
         vTaskDelay(pdMS_TO_TICKS(20));
     }
+    int64_t elapsed_ms = (esp_timer_get_time() - t0) / 1000;
 
+    Serial.printf("  4 tasks x 250 mutex-protected increments  ->  total=%d  tasks_done=%d  elapsed=%lld ms\n",
+                  s_contend_total, s_contend_tasks_done, elapsed_ms);
     TEST_ASSERT_EQUAL(4, s_contend_tasks_done);
-    TEST_ASSERT_EQUAL(4 * 250, s_contend_total); // 1000 increments total
+    TEST_ASSERT_EQUAL(4 * 250, s_contend_total);
 
     vSemaphoreDelete(s_contend_mutex);
     vSemaphoreDelete(s_contend_done);
@@ -220,6 +231,7 @@ void test_four_tasks_contending_mutex_consistency(void)
 void setup()
 {
     delay(2000);
+    Serial.println("\n=== Stress Tests ===");
     UNITY_BEGIN();
     RUN_TEST(test_queue_flood_no_data_loss);
     RUN_TEST(test_isr_burst_semaphore_gives);

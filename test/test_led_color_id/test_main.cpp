@@ -1,3 +1,4 @@
+#include <stdio.h>
 #include <unity.h>
 #include "game_logic.h"
 
@@ -9,48 +10,67 @@ void tearDown(void) {}
 // ---------------------------------------------------------------------------
 
 void test_pure_black_is_0(void) {
-    TEST_ASSERT_EQUAL(0, getLedColorId(0, 0, 0));
+    int id = getLedColorId(0, 0, 0);
+    printf("  getLedColorId(0, 0, 0) = %d\n", id);
+    TEST_ASSERT_EQUAL(0, id);
 }
 void test_near_black_under_threshold_is_0(void) {
-    TEST_ASSERT_EQUAL(0, getLedColorId(19, 19, 19));
+    int id = getLedColorId(19, 19, 19);
+    printf("  getLedColorId(19, 19, 19) = %d  (under threshold)\n", id);
+    TEST_ASSERT_EQUAL(0, id);
 }
 void test_exactly_at_black_threshold_is_0(void) {
-    // threshold is < 20 on all channels
-    TEST_ASSERT_EQUAL(0, getLedColorId(10, 10, 10));
+    int id = getLedColorId(10, 10, 10);
+    printf("  getLedColorId(10, 10, 10) = %d  (threshold < 20)\n", id);
+    TEST_ASSERT_EQUAL(0, id);
 }
 
 void test_pure_blue_is_1(void) {
-    TEST_ASSERT_EQUAL(1, getLedColorId(0, 0, 255));
+    int id = getLedColorId(0, 0, 255);
+    printf("  getLedColorId(0, 0, 255) = %d  [Blue]\n", id);
+    TEST_ASSERT_EQUAL(1, id);
 }
 void test_pure_red_is_2(void) {
-    TEST_ASSERT_EQUAL(2, getLedColorId(255, 0, 0));
+    int id = getLedColorId(255, 0, 0);
+    printf("  getLedColorId(255, 0, 0) = %d  [Red]\n", id);
+    TEST_ASSERT_EQUAL(2, id);
 }
 void test_pure_green_is_3(void) {
-    TEST_ASSERT_EQUAL(3, getLedColorId(0, 255, 0));
+    int id = getLedColorId(0, 255, 0);
+    printf("  getLedColorId(0, 255, 0) = %d  [Green]\n", id);
+    TEST_ASSERT_EQUAL(3, id);
 }
 
 void test_pure_yellow_is_4(void) {
-    // r>120, g>120, b<100
-    TEST_ASSERT_EQUAL(4, getLedColorId(255, 255, 0));
+    int id = getLedColorId(255, 255, 0);
+    printf("  getLedColorId(255, 255, 0) = %d  [Yellow]\n", id);
+    TEST_ASSERT_EQUAL(4, id);
 }
 void test_pure_magenta_is_5(void) {
-    // r>120, b>120, g<100
-    TEST_ASSERT_EQUAL(5, getLedColorId(255, 0, 255));
+    int id = getLedColorId(255, 0, 255);
+    printf("  getLedColorId(255, 0, 255) = %d  [Magenta]\n", id);
+    TEST_ASSERT_EQUAL(5, id);
 }
 void test_pure_cyan_is_6(void) {
-    // g>120, b>120, r<100
-    TEST_ASSERT_EQUAL(6, getLedColorId(0, 255, 255));
+    int id = getLedColorId(0, 255, 255);
+    printf("  getLedColorId(0, 255, 255) = %d  [Cyan]\n", id);
+    TEST_ASSERT_EQUAL(6, id);
 }
 
 void test_pure_white_is_7(void) {
-    // all > 180
-    TEST_ASSERT_EQUAL(7, getLedColorId(255, 255, 255));
+    int id = getLedColorId(255, 255, 255);
+    printf("  getLedColorId(255, 255, 255) = %d  [White]\n", id);
+    TEST_ASSERT_EQUAL(7, id);
 }
 void test_near_white_is_7(void) {
-    TEST_ASSERT_EQUAL(7, getLedColorId(200, 200, 200));
+    int id = getLedColorId(200, 200, 200);
+    printf("  getLedColorId(200, 200, 200) = %d  [near white]\n", id);
+    TEST_ASSERT_EQUAL(7, id);
 }
 void test_exactly_at_white_threshold_is_7(void) {
-    TEST_ASSERT_EQUAL(7, getLedColorId(181, 181, 181));
+    int id = getLedColorId(181, 181, 181);
+    printf("  getLedColorId(181, 181, 181) = %d  [at white threshold]\n", id);
+    TEST_ASSERT_EQUAL(7, id);
 }
 
 // ---------------------------------------------------------------------------
@@ -60,6 +80,7 @@ void test_exactly_at_white_threshold_is_7(void) {
 void test_code0_gives_black(void) {
     uint8_t r, g, b;
     getColorComponents(0, r, g, b);
+    printf("  getColorComponents(0) = (R=%u, G=%u, B=%u)  [Black]\n", r, g, b);
     TEST_ASSERT_EQUAL(0, r);
     TEST_ASSERT_EQUAL(0, g);
     TEST_ASSERT_EQUAL(0, b);
@@ -67,6 +88,7 @@ void test_code0_gives_black(void) {
 void test_code8_gives_black(void) {
     uint8_t r, g, b;
     getColorComponents(8, r, g, b);
+    printf("  getColorComponents(8) = (R=%u, G=%u, B=%u)  [out-of-range -> Black]\n", r, g, b);
     TEST_ASSERT_EQUAL(0, r);
     TEST_ASSERT_EQUAL(0, g);
     TEST_ASSERT_EQUAL(0, b);
@@ -74,6 +96,7 @@ void test_code8_gives_black(void) {
 void test_code1_gives_blue(void) {
     uint8_t r, g, b;
     getColorComponents(1, r, g, b);
+    printf("  getColorComponents(1) = (R=%u, G=%u, B=%u)  [Blue]\n", r, g, b);
     TEST_ASSERT_EQUAL(  0, r);
     TEST_ASSERT_EQUAL(  0, g);
     TEST_ASSERT_EQUAL(255, b);
@@ -81,6 +104,7 @@ void test_code1_gives_blue(void) {
 void test_code7_gives_white(void) {
     uint8_t r, g, b;
     getColorComponents(7, r, g, b);
+    printf("  getColorComponents(7) = (R=%u, G=%u, B=%u)  [White]\n", r, g, b);
     TEST_ASSERT_EQUAL(255, r);
     TEST_ASSERT_EQUAL(255, g);
     TEST_ASSERT_EQUAL(255, b);
@@ -93,37 +117,51 @@ void test_code7_gives_white(void) {
 void test_roundtrip_code1(void) {
     uint8_t r, g, b;
     getColorComponents(1, r, g, b);
-    TEST_ASSERT_EQUAL(1, getLedColorId(r, g, b));
+    int id = getLedColorId(r, g, b);
+    printf("  round-trip code 1: (R=%u,G=%u,B=%u) -> id=%d\n", r, g, b, id);
+    TEST_ASSERT_EQUAL(1, id);
 }
 void test_roundtrip_code2(void) {
     uint8_t r, g, b;
     getColorComponents(2, r, g, b);
-    TEST_ASSERT_EQUAL(2, getLedColorId(r, g, b));
+    int id = getLedColorId(r, g, b);
+    printf("  round-trip code 2: (R=%u,G=%u,B=%u) -> id=%d\n", r, g, b, id);
+    TEST_ASSERT_EQUAL(2, id);
 }
 void test_roundtrip_code3(void) {
     uint8_t r, g, b;
     getColorComponents(3, r, g, b);
-    TEST_ASSERT_EQUAL(3, getLedColorId(r, g, b));
+    int id = getLedColorId(r, g, b);
+    printf("  round-trip code 3: (R=%u,G=%u,B=%u) -> id=%d\n", r, g, b, id);
+    TEST_ASSERT_EQUAL(3, id);
 }
 void test_roundtrip_code4(void) {
     uint8_t r, g, b;
     getColorComponents(4, r, g, b);
-    TEST_ASSERT_EQUAL(4, getLedColorId(r, g, b));
+    int id = getLedColorId(r, g, b);
+    printf("  round-trip code 4: (R=%u,G=%u,B=%u) -> id=%d\n", r, g, b, id);
+    TEST_ASSERT_EQUAL(4, id);
 }
 void test_roundtrip_code5(void) {
     uint8_t r, g, b;
     getColorComponents(5, r, g, b);
-    TEST_ASSERT_EQUAL(5, getLedColorId(r, g, b));
+    int id = getLedColorId(r, g, b);
+    printf("  round-trip code 5: (R=%u,G=%u,B=%u) -> id=%d\n", r, g, b, id);
+    TEST_ASSERT_EQUAL(5, id);
 }
 void test_roundtrip_code6(void) {
     uint8_t r, g, b;
     getColorComponents(6, r, g, b);
-    TEST_ASSERT_EQUAL(6, getLedColorId(r, g, b));
+    int id = getLedColorId(r, g, b);
+    printf("  round-trip code 6: (R=%u,G=%u,B=%u) -> id=%d\n", r, g, b, id);
+    TEST_ASSERT_EQUAL(6, id);
 }
 void test_roundtrip_code7(void) {
     uint8_t r, g, b;
     getColorComponents(7, r, g, b);
-    TEST_ASSERT_EQUAL(7, getLedColorId(r, g, b));
+    int id = getLedColorId(r, g, b);
+    printf("  round-trip code 7: (R=%u,G=%u,B=%u) -> id=%d\n", r, g, b, id);
+    TEST_ASSERT_EQUAL(7, id);
 }
 
 int main(int argc, char **argv) {

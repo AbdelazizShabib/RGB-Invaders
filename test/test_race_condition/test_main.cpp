@@ -112,13 +112,14 @@ void test_unsynchronized_increments_lose_updates(void)
     int expected = RACE_ITERS * 2;   // 100 — correct result with no race
     int actual   = s_unsafe_counter;
     int lost     = expected - actual;
+    float loss_pct = expected > 0 ? 100.0f * lost / expected : 0.0f;
 
     // *** FORMAL RESULT ***
     // The counter MUST be less than 100.  Any value equal to 100 would mean
     // that by coincidence the two cores never overlapped — essentially
     // impossible with the 1 ms window and 50 paired iterations.
-    Serial.printf("\n[RACE] WITHOUT MUTEX — expected=%d  actual=%d  lost_updates=%d\n",
-                  expected, actual, lost);
+    Serial.printf("\n[RACE] WITHOUT MUTEX — iterations=%d x 2 cores  expected=%d  actual=%d  lost_updates=%d (%.0f%% loss)\n",
+                  RACE_ITERS, expected, actual, lost, loss_pct);
 
     TEST_ASSERT_LESS_THAN(expected, actual);
 
@@ -149,9 +150,10 @@ void test_mutex_protected_increments_are_exact(void)
 
     int expected = RACE_ITERS * 2;   // 100
     int actual   = s_safe_counter;
+    bool perfect = (actual == expected);
 
-    Serial.printf("[RACE] WITH MUTEX    — expected=%d  actual=%d  (exact!)\n\n",
-                  expected, actual);
+    Serial.printf("[RACE] WITH MUTEX    — iterations=%d x 2 cores  expected=%d  actual=%d  lost=0  consistency=%s\n\n",
+                  RACE_ITERS, expected, actual, perfect ? "100% (exact)" : "MISMATCH");
 
     TEST_ASSERT_EQUAL(expected, actual);
 

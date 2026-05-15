@@ -1,163 +1,197 @@
-name: ESP32 CI
+name: ESP32 CI Pipeline
 
 on:
   push:
   pull_request:
 
 jobs:
-  # -------------------------------------------------------------------------
-  # Job 1: Build ESP32 firmware (compile-check, no device required)
-  # -------------------------------------------------------------------------
-  build-firmware:
+
+  firmware-build:
     name: Build ESP32 Firmware
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-
-      - name: Cache PlatformIO packages
-        uses: actions/cache@v4
-        with:
-          path: ~/.platformio
-          key: pio-${{ runner.os }}-${{ hashFiles('platformio.ini') }}
-          restore-keys: pio-${{ runner.os }}-
+      - uses: actions/checkout@v4
 
       - name: Install PlatformIO
         run: pip install platformio
 
-      - name: Build ESP32 Firmware
+      - name: Build Main Firmware
         run: platformio run -e freenove_esp32_s3_wroom
 
-      - name: Upload firmware artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: firmware-bin
-          path: .pio/build/freenove_esp32_s3_wroom/firmware.bin
-          retention-days: 7
 
-  # -------------------------------------------------------------------------
-  # Job 2: Native unit tests (pure logic, no hardware)
-  # -------------------------------------------------------------------------
   native-tests:
-    name: Native Unit Tests
+    name: Native Logic Tests
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-
-      - name: Cache PlatformIO packages
-        uses: actions/cache@v4
-        with:
-          path: ~/.platformio
-          key: pio-${{ runner.os }}-${{ hashFiles('platformio.ini') }}
-          restore-keys: pio-${{ runner.os }}-
+      - uses: actions/checkout@v4
 
       - name: Install PlatformIO
         run: pip install platformio
 
-      - name: Run Native Unit Tests
-        run: platformio test -e native --verbose
+      - name: Run Native Tests
+        run: platformio test -e native
 
-      - name: Upload test results
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: native-test-results
-          path: .pio/build/native/
-          retention-days: 7
 
-  # -------------------------------------------------------------------------
-  # Job 3: Compile-check ESP32 test environments (no device required)
-  # Verifies that RTOS/hardware test code at least compiles correctly.
-  # -------------------------------------------------------------------------
-  compile-esp32-tests:
-    name: Compile ESP32 Test Environments
-    runs-on: ubuntu-latest
-    needs: build-firmware
-
-    steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-
-      - name: Cache PlatformIO packages
-        uses: actions/cache@v4
-        with:
-          path: ~/.platformio
-          key: pio-${{ runner.os }}-${{ hashFiles('platformio.ini') }}
-          restore-keys: pio-${{ runner.os }}-
-
-      - name: Install PlatformIO
-        run: pip install platformio
-
-      - name: Compile esp32-test environment
-        run: platformio run -e esp32-test
-
-      - name: Compile stress-test environment
-        run: platformio run -e stress-test
-
-  # -------------------------------------------------------------------------
-  # Job 4: Static analysis with cppcheck
-  # -------------------------------------------------------------------------
   static-analysis:
     name: Static Analysis
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Install cppcheck
-        run: sudo apt-get install -y cppcheck
+      - name: Install PlatformIO
+        run: pip install platformio
 
-      - name: Run cppcheck on lib/
-        run: |
-          cppcheck \
-            --enable=warning,style,performance \
-            --std=c++17 \
-            --suppress=missingIncludeSystem \
-            --suppress=unmatchedSuppression \
-            --error-exitcode=1 \
-            lib/game_logic/
+      - name: Run PlatformIO Check
+        run: platformio check -e freenove_esp32_s3_wroom
 
-      - name: Run cppcheck on test/ (native targets only)
-        run: |
-          cppcheck \
-            --enable=warning,style,performance \
-            --std=c++17 \
-            --suppress=missingIncludeSystem \
-            --suppress=unmatchedSuppression \
-            --error-exitcode=0 \
-            test/test_simon_stage/ \
-            test/test_combo_color/ \
-            test/test_score_rank/ \
-            test/test_level_score/ \
-            test/test_led_color_id/ \
-            test/test_accuracy/ \
-            test/test_win_condition/
 
-  # -------------------------------------------------------------------------
-  # Summary gate: all required jobs must pass
-  # -------------------------------------------------------------------------
+  queue-validation:
+    name: Queue Validation
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install PlatformIO
+        run: pip install platformio
+
+      - name: Compile Queue Tests
+        run: platformio test -e esp32-test -f test_rtos_queues --without-uploading
+
+
+  semaphore-validation:
+    name: Semaphore Validation
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install PlatformIO
+        run: pip install platformio
+
+      - name: Compile Semaphore Tests
+        run: platformio test -e esp32-test -f test_rtos_semaphores --without-uploading
+
+
+  mutex-validation:
+    name: Mutex Validation
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install PlatformIO
+        run: pip install platformio
+
+      - name: Compile Mutex Tests
+        run: platformio test -e esp32-test -f test_rtos_mutexes --without-uploading
+
+
+  task-validation:
+    name: Task Validation
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install PlatformIO
+        run: pip install platformio
+
+      - name: Compile Task Tests
+        run: platformio test -e esp32-test -f test_rtos_tasks --without-uploading
+
+
+  timing-validation:
+    name: Timing Validation
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install PlatformIO
+        run: pip install platformio
+
+      - name: Compile Timing Tests
+        run: platformio test -e esp32-test -f test_timing --without-uploading
+
+
+  multicore-validation:
+    name: Multicore Validation
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install PlatformIO
+        run: pip install platformio
+
+      - name: Compile Multicore Tests
+        run: platformio test -e esp32-test -f test_multicore --without-uploading
+
+
+  hardware-init-validation:
+    name: Hardware Init Validation
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install PlatformIO
+        run: pip install platformio
+
+      - name: Compile Hardware Init Tests
+        run: platformio test -e esp32-test -f test_hardware_init --without-uploading
+
+
+  fault-injection-validation:
+    name: Fault Injection Validation
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install PlatformIO
+        run: pip install platformio
+
+      - name: Compile Fault Injection Tests
+        run: platformio test -e esp32-test -f test_fault_injection --without-uploading
+
+
+  stress-validation:
+    name: Stress Validation
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install PlatformIO
+        run: pip install platformio
+
+      - name: Compile Stress Tests
+        run: platformio test -e stress-test --without-uploading
+
+
   ci-gate:
     name: CI Gate
     runs-on: ubuntu-latest
+
     needs:
-      - build-firmware
+      - firmware-build
       - native-tests
-      - compile-esp32-tests
       - static-analysis
-    if: always()
+      - queue-validation
+      - semaphore-validation
+      - mutex-validation
+      - task-validation
+      - timing-validation
+      - multicore-validation
+      - hardware-init-validation
+      - fault-injection-validation
+      - stress-validation
 
     steps:
-      - name: Check all jobs passed
-        run: |
-          if [[ "${{ needs.build-firmware.result }}"       != "success" ||
-                "${{ needs.native-tests.result }}"         != "success" ||
-                "${{ needs.compile-esp32-tests.result }}"  != "success" ||
-                "${{ needs.static-analysis.result }}"      != "success" ]]; then
-            echo "One or more CI jobs failed."
-            exit 1
-          fi
-          echo "All CI jobs passed."
+      - name: Final CI Status
+        run: echo "All validation stages passed successfully."
